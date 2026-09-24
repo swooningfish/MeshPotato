@@ -154,7 +154,7 @@ To cover a longer period in one message, space the hours out with `WXH_STEP_HOUR
 
 ```
 ⚠️ East of England: 🟠💨 Wind Thu 18:00-Fri 12:00 | 🟡🌧️ Rain Sat 06:00-21:00
-✅ No warnings for East of England
+✅ No weather warnings for East of England
 ```
 
 | Symbol | Meaning |

@@ -970,7 +970,7 @@ def format_warnings(warnings: list[dict], code: str, budget: Optional[int] = Non
     region = WARN_REGIONS.get(code, code)
     live = [w for w in warnings if not w["end"] or w["end"] > now]
     if not live:
-        return f"✅ No warnings for {region}" if USE_EMOJI else f"No warnings for {region}"
+        return f"✅ No weather warnings for {region}" if USE_EMOJI else f"No weather warnings for {region}"
     live.sort(key=lambda w: (WARN_LEVELS.get(w["level"], 9), w["start"] or now))
     items = []
     for w in live:

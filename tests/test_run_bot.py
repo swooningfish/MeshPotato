@@ -331,7 +331,7 @@ def test_format_warnings(monkeypatch):
     short = bot.format_warnings(warnings, "ee", budget=70, now=now)
     assert short.endswith("+1 more") and len(short.encode("utf-8")) <= 70
     monkeypatch.setattr(bot, "USE_EMOJI", False)
-    assert bot.format_warnings([], "ee", now=now) == "No warnings for East of England"
+    assert bot.format_warnings([], "ee", now=now) == "No weather warnings for East of England"
 
 
 @pytest.mark.parametrize("postcode, code", [
