@@ -42,6 +42,12 @@
 # aurora_cache_sec = 300            # reuse the data for 5 min. AuroraWatch UK asks for no more than
 #                                   # one request per 3 min, so anything under 180 is raised to 180
 
+# ---------- Air quality and pollen (Open-Meteo) ----------
+# air_cache_sec = 3600              # reuse a place's air quality and pollen for 1 hour
+# Pollen counts (grains/m³) where Moderate, High and Very high start. Grass uses the
+# Met Office scale. Types left out (birch, alder, mugwort, ragweed) show the count only.
+# pollen_levels = { grass = [30, 50, 150] }   # add e.g. birch = [...] with your own thresholds
+
 # Named places for !wx <name>. This replaces the built-in list.
 # [locations]
 # Norwich = [52.6278, 1.2983]

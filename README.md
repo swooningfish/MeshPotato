@@ -1,6 +1,6 @@
 # MeshPotato 🥔: MeshCore WX, Ping, Bot
 
-A MeshCore chat bot for a Raspberry Pi running Arch Linux ARM. It answers ping and test commands, posts Met Office weather and weather warnings, gives sunrise, sunset, moon phase and aurora alerts, reports its own stats to admins, lets admins mute it or post as it, rate limits spam and sends scheduled messages. It runs as a systemd service and starts on boot.
+A MeshCore chat bot for a Raspberry Pi running Arch Linux ARM. It answers ping and test commands, posts Met Office weather and weather warnings, gives sunrise, sunset, moon phase, aurora alerts, air quality and pollen, reports its own stats to admins, lets admins mute it or post as it, rate limits spam and sends scheduled messages. It runs as a systemd service and starts on boot.
 
 Files in this repo:
 
@@ -78,8 +78,10 @@ If the location can't be found, the bot doesn't reply. The failed lookup is stil
 | `!sun` / `!sun <location>` | Sunrise, sunset and hours of daylight today |
 | `!moon` | Moon phase, how much is lit, and the next full and new moon |
 | `!aurora` | Geomagnetic activity and aurora alert level from AuroraWatch UK |
+| `!aq` / `!aq <location>` | Air quality index and main pollutants now |
+| `!pollen` / `!pollen <location>` | Pollen forecast for the next 24 hours |
 
-Short aliases: `!warnings` = `!warn`, `!sunrise` and `!sunset` = `!sun`, `!solar` = `!aurora`.
+Short aliases: `!warnings` = `!warn`, `!sunrise` and `!sunset` = `!sun`, `!solar` = `!aurora`, `!air` = `!aq`.
 
 #### Admin commands (`!` required, admins only)
 
@@ -119,7 +121,7 @@ Short aliases: `!dice` = `!roll`, `!flip` and `!coin` = `!flipacoin`, `!8ball` =
 
 Dice, coin and eight ball use Python's `SystemRandom`, which draws on the operating system's random source.
 
-The path, fun, warning, sun, moon, aurora and status commands count toward the same rate limits as the weather commands.
+The path, fun, warning, sun, moon, aurora, air quality, pollen and status commands count toward the same rate limits as the weather commands.
 
 `<location>` accepts:
 
@@ -291,6 +293,36 @@ The AuroraWatch UK API terms shape how the bot uses it:
 - **Levels:** the bot uses AuroraWatch UK's level names and descriptions unchanged.
 
 Add `{aurora}` to a scheduled message to post it at set times.
+
+### Air quality and pollen (!aq, !pollen)
+
+Both come from the [Open-Meteo](https://open-meteo.com/) air quality API, which uses the European CAMS model. It is free and needs no key. Open-Meteo is a Swiss company. The free tier is for non-commercial use, and the data is CC BY 4.0, so every reply credits Open-Meteo. One request covers both commands for a place, and it is cached for an hour (`AIR_CACHE_SEC`).
+
+```
+🟢 Norwich air: Fair (EAQI 22) | PM2.5 5 PM10 9 NO2 7 O3 63 µg/m³ | Open-Meteo
+🌼 Norwich pollen 24h: Grass 45 Moderate | Alder 3 grains/m³ | Open-Meteo
+```
+
+`!aq` gives the European Air Quality Index (EAQI) now, with its band, and the main pollutants in µg/m³:
+
+| EAQI | Band | | Pollutant | What it is |
+|------|------|-|-----------|------------|
+| 0-20 | 🟢 Good | | PM2.5 | Fine particles |
+| 20-40 | 🟢 Fair | | PM10 | Coarse particles |
+| 40-60 | 🟡 Moderate | | NO2 | Nitrogen dioxide, mostly traffic |
+| 60-80 | 🟠 Poor | | O3 | Ozone |
+| 80-100 | 🔴 Very poor | | | |
+| over 100 | 🟣 Extremely poor | | | |
+
+This is the European index, not the UK's 1 to 10 Daily Air Quality Index (DAQI), so the numbers won't match UK-AIR. If the reply is too long, the pollutants are dropped and the index stays.
+
+`!pollen` gives the highest count of each pollen type over the next 24 hours, in grains/m³, highest first:
+
+- **Types:** grass, birch, alder, mugwort and ragweed. Types with no pollen are left out.
+- **Levels:** grass gets a level from the Met Office scale: Low, Moderate from 30, High from 50, Very high from 150. The other types show the count only. Add thresholds for them with `pollen_levels` in `config.toml`.
+- **Out of season:** CAMS only forecasts pollen during the pollen season (roughly spring and summer). Outside it, the reply is `None forecast`.
+
+Both accept the same `<location>` forms as `!wx`. Add `{aq}`, `{aq:place}`, `{pollen}` or `{pollen:place}` to a scheduled message to post them at set times.
 
 ### Stats and uptime (!stats, !uptime)
 
@@ -501,6 +533,8 @@ The bot reads `config.toml` from the folder `run_bot.py` is in. To use another f
 | `warn_watch_max` | `10` | Most region and channel pairs watched at once |
 | `warn_watch_tick_sec` | `60` | How often watched regions are checked |
 | `aurora_cache_sec` | `300` | How long to reuse AuroraWatch UK data (5 minutes, never less than 180) |
+| `air_cache_sec` | `3600` | How long to reuse Open-Meteo air quality and pollen for a place (1 hour) |
+| `pollen_levels` | `{grass = [30, 50, 150]}` | Pollen counts where Moderate, High and Very high start, per type |
 | `max_reply_bytes` | `135` | MeshCore limits messages by bytes. Emojis take 4 to 7 bytes each |
 | `wx_cache_sec` | `1800` | How long to reuse a forecast (30 minutes) |
 | `wx_daily_call_budget` | `300` | Most Met Office calls per UTC day |
@@ -545,6 +579,8 @@ Tokens filled in at send time:
 | `{sun}` / `{sun:Ipswich}` | Sunrise, sunset and daylight |
 | `{moon}` | Moon phase |
 | `{aurora}` | Aurora alert level and geomagnetic activity |
+| `{aq}` / `{aq:Ipswich}` | Air quality |
+| `{pollen}` / `{pollen:Ipswich}` | Pollen forecast |
 
 Example:
 
@@ -740,12 +776,24 @@ sudo timedatectl set-ntp true
 
 ---
 
+## To do
+
+- [ ] **`!tide <place>`**: UK tide times (next high and low water, with heights) from the [ADMIRALTY UK Tidal API](https://www.admiralty.co.uk/access-data/apis), run by the UK Hydrographic Office.
+  - Needs a free Discovery tier key, stored like the Met Office key. Check the tier's station count, days of predictions and call limits on the portal before building.
+  - Match the place to the nearest tidal station, and don't reply for places far inland.
+  - Cache predictions per station for several hours, because tide predictions don't change during the day.
+  - Credit ADMIRALTY / UKHO in the reply if the licence asks for it.
+
+---
 
 ## Credits
 
 - Built on the `https://github.com/meshcore-dev/meshcore_py` examples `serial_pingbot.py` and `serial_rss_bot.py`
 - Weather: Met Office Weather DataHub, Site Specific API
+- Weather warnings: Met Office warnings RSS feed
 - Geocoding: postcodes.io
+- Aurora alerts: [AuroraWatch UK](https://aurorawatch.lancs.ac.uk/), Lancaster University
+- Air quality and pollen: [Open-Meteo](https://open-meteo.com/) (CC BY 4.0), from the Copernicus Atmosphere Monitoring Service (CAMS)
 
 ## License
 

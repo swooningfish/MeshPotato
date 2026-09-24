@@ -267,6 +267,77 @@ def test_aurora_lookup_failure(monkeypatch):
     assert asyncio.run(bot.get_aurora()) == "AURORA: lookup failed"
 
 
+AIR_DATA = {
+    "current": {"european_aqi": 22, "pm10": 9.4, "pm2_5": 4.6, "nitrogen_dioxide": 7.4, "ozone": 63.0},
+    "hourly": {
+        "time": [f"2026-05-{d:02d}T{h:02d}:00" for d in (24, 25) for h in range(24)],
+        "grass_pollen": [0.0] * 20 + [45.0] + [0.0] * 27,        # 20:00 today
+        "birch_pollen": [12.0] + [0.0] * 47,                      # 00:00 today, already past
+        "alder_pollen": [0.0] * 30 + [3.2] + [0.0] * 17,          # 06:00 tomorrow
+        "mugwort_pollen": [0.0] * 48,
+        "ragweed_pollen": [None] * 48,
+    },
+}
+
+
+@pytest.mark.parametrize("aqi, band", [(0, "Good"), (20, "Good"), (22, "Fair"), (55, "Moderate"),
+                                       (79, "Poor"), (100, "Very poor"), (140, "Extremely poor"), (None, "Unknown")])
+def test_eaqi_band(aqi, band):
+    assert bot.eaqi_band(aqi) == band
+
+
+def test_format_air(monkeypatch):
+    assert bot.format_air(AIR_DATA, "Norwich") == \
+        "🟢 Norwich air: Fair (EAQI 22) | PM2.5 5 PM10 9 NO2 7 O3 63 µg/m³ | Open-Meteo"
+    assert bot.format_air(AIR_DATA, "Norwich", budget=60) == "🟢 Norwich air: Fair (EAQI 22) | Open-Meteo"
+    monkeypatch.setattr(bot, "USE_EMOJI", False)
+    assert bot.format_air({"current": {}}, "Cromer") == "Cromer air: Unknown | Open-Meteo"
+
+
+def test_pollen_peaks_next_24h():
+    now = datetime(2026, 5, 24, 9, 30, tzinfo=LONDON)
+    peaks = bot.pollen_peaks(AIR_DATA, now=now)
+    assert peaks == {"Grass": 45.0, "Birch": 0.0, "Alder": 3.2, "Mugwort": 0.0}
+
+
+def test_pollen_level(monkeypatch):
+    monkeypatch.setattr(bot, "POLLEN_LEVELS", {"grass": [30, 50, 150]})
+    assert [bot.pollen_level("Grass", g) for g in (10, 30, 49, 50, 150)] == \
+        ["Low", "Moderate", "Moderate", "High", "Very high"]
+    assert bot.pollen_level("Birch", 500) == ""
+
+
+def test_format_pollen(monkeypatch):
+    monkeypatch.setattr(bot, "POLLEN_LEVELS", {"grass": [30, 50, 150]})
+    peaks = {"Grass": 45.0, "Birch": 0.0, "Alder": 3.2}
+    assert bot.format_pollen(peaks, "Norwich") == \
+        "🌼 Norwich pollen 24h: Grass 45 Moderate | Alder 3 grains/m³ | Open-Meteo"
+    assert bot.format_pollen({"Grass": 0.2}, "Norwich") == "🌼 Norwich pollen 24h: None forecast | Open-Meteo"
+    short = bot.format_pollen(peaks, "Norwich", budget=65)
+    assert short == "🌼 Norwich pollen 24h: Grass 45 Moderate grains/m³ | Open-Meteo"
+
+
+def test_aq_and_pollen_commands(monkeypatch):
+    calls = []
+    monkeypatch.setattr(bot, "_geocode_sync", lambda q: (52.6278, 1.2983, "Norwich"))
+    monkeypatch.setattr(bot, "_air_cache", bot.TTLCache(60))
+    monkeypatch.setattr(bot, "_http_get_json", lambda url, headers=None: calls.append(url) or AIR_DATA)
+    assert bot.parse_command("!air Cromer") == ("!aq", "Cromer")
+    assert bot.parse_command("!pollen") == ("!pollen", "")
+    assert asyncio.run(bot.run_command("!aq", "", "Alice", {})).startswith("@[Alice] 🟢 Norwich air: Fair")
+    assert asyncio.run(bot.run_command("!pollen", "", "Alice", {})).startswith("@[Alice] 🌼 Norwich pollen 24h:")
+    assert len(calls) == 1                                  # one request serves both, then cached
+    assert "european_aqi" in calls[0] and "grass_pollen" in calls[0]
+
+
+def test_aq_unknown_place_is_silent(monkeypatch):
+    def not_found(query):
+        raise bot.LocationError(f"'{query}' not found")
+    monkeypatch.setattr(bot, "_geocode_sync", not_found)
+    assert asyncio.run(bot.run_command("!aq", "nowhere", "Alice", {})) is None
+    assert asyncio.run(bot.get_air("nowhere", mode="pollen")) == "POLLEN: 'nowhere' not found"
+
+
 def test_help_fits_one_message():
     assert "!path" in bot.HELP_TEXT
     assert len(bot.HELP_TEXT.encode("utf-8")) <= bot.MAX_REPLY_BYTES
@@ -753,6 +824,7 @@ def restore_settings():
     bot._geo_cache.ttl = bot.GEOCODE_CACHE_SEC
     bot._warn_cache.ttl = bot.WARN_CACHE_SEC
     bot._aurora_cache.ttl = max(bot.AURORA_MIN_CACHE_SEC, bot.AURORA_CACHE_SEC)
+    bot._air_cache.ttl = bot.AIR_CACHE_SEC
 
 
 @pytest.mark.skipif(bot.tomllib is None, reason="needs Python 3.11+")

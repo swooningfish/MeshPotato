@@ -15,6 +15,8 @@ Commands (channel or direct message):
   !sun [location]    -> Sunrise, sunset and hours of daylight today
   !moon              -> Moon phase, % lit and the next full and new moon
   !aurora / !solar   -> Geomagnetic activity and aurora alert level from AuroraWatch UK
+  !aq [location]     -> Air quality index and pollutants from Open-Meteo
+  !pollen [location] -> Pollen forecast for the next 24 hours from Open-Meteo
   !stats             -> Commands served, messages heard, Met Office calls used (admin DMs only)
   !uptime            -> How long the bot (and the computer) has been up (admin DMs only)
   !mute <minutes>    -> Stop replies and scheduled messages for a while (admin DMs only)
@@ -113,6 +115,10 @@ WARN_WATCH_HOURS = 24           # after a !warn, post changes to that region's w
 WARN_WATCH_MAX = 10             # most regions and channels watched at once
 WARN_WATCH_TICK_SEC = 60        # how often watched regions are checked
 AURORA_CACHE_SEC = 300          # reuse AuroraWatch UK data for 5 min (never less than 3 min, their rule)
+AIR_CACHE_SEC = 3600            # reuse Open-Meteo air quality and pollen for a place for 1 hour
+# Pollen count thresholds in grains/m³: [moderate from, high from, very high from].
+# Grass uses the Met Office scale. Types not listed show the count only.
+POLLEN_LEVELS: dict[str, list[float]] = {"grass": [30, 50, 150]}
 
 # ---------- Rate limits: (max_events, window_seconds) ----------
 RATE_LIMIT_GLOBAL = (20, 60)        # all commands across the bot
@@ -151,6 +157,7 @@ EIGHTBALL_ANSWERS = [
 #   "every_minutes": N              repeating interval, optional "start": "HH:MM"
 # Text tokens: {time} {date} {wx} {wx:place} {wxh} {wxh:place} {wxf} {wxf:place}
 #              {warn} {warn:place} {sun} {sun:place} {moon} {aurora}
+#              {aq} {aq:place} {pollen} {pollen:place}
 SCHEDULED_MESSAGES: list[dict[str, Any]] = [
     {"name": "morning-wx", "time": "07:30", "days": ["mon", "tue", "wed", "thu", "fri"],
      "channel": 1, "text": "Morning WX {wx}"},
@@ -250,6 +257,8 @@ _CONFIG_SETTINGS: dict[str, Optional[Callable[[Any], Any]]] = {
     "WARN_WATCH_MAX": None,
     "WARN_WATCH_TICK_SEC": None,
     "AURORA_CACHE_SEC": None,
+    "AIR_CACHE_SEC": None,
+    "POLLEN_LEVELS": lambda d: {str(k).lower(): [float(x) for x in v] for k, v in d.items()},
     "RATE_LIMIT_GLOBAL": _pair,
     "RATE_LIMIT_PER_USER": _pair,
     "RATE_LIMIT_PER_CHANNEL": _pair,
@@ -308,6 +317,7 @@ def load_config(path: Optional[str] = None) -> Optional[str]:
     _geo_cache.ttl = GEOCODE_CACHE_SEC
     _warn_cache.ttl = WARN_CACHE_SEC
     _aurora_cache.ttl = max(AURORA_MIN_CACHE_SEC, AURORA_CACHE_SEC)
+    _air_cache.ttl = AIR_CACHE_SEC
     return path
 
 
@@ -1377,6 +1387,135 @@ async def get_aurora() -> str:
 
 
 # =====================================================================
+# Air quality and pollen (Open-Meteo, CAMS Europe model, free, no key)
+# Terms: non-commercial use, CC BY 4.0 so replies credit Open-Meteo,
+# under 10,000 calls a day. https://open-meteo.com/en/terms
+# =====================================================================
+AIR_API = "https://air-quality-api.open-meteo.com/v1/air-quality"
+AIR_CREDIT = "Open-Meteo"
+AIR_POLLUTANTS = [("pm2_5", "PM2.5"), ("pm10", "PM10"), ("nitrogen_dioxide", "NO2"), ("ozone", "O3")]
+# European Air Quality Index bands (European Environment Agency): upper bound -> name
+EAQI_BANDS = [(20, "Good"), (40, "Fair"), (60, "Moderate"), (80, "Poor"), (100, "Very poor")]
+EAQI_EMOJI = {"Good": "🟢", "Fair": "🟢", "Moderate": "🟡", "Poor": "🟠", "Very poor": "🔴",
+              "Extremely poor": "🟣"}
+# Open-Meteo pollen types that grow in the UK. Olive is left out
+POLLEN_TYPES = [("grass_pollen", "Grass"), ("birch_pollen", "Birch"), ("alder_pollen", "Alder"),
+                ("mugwort_pollen", "Mugwort"), ("ragweed_pollen", "Ragweed")]
+
+_air_cache = TTLCache(AIR_CACHE_SEC)
+
+
+def eaqi_band(value: Optional[float]) -> str:
+    if value is None:
+        return "Unknown"
+    for upper, name in EAQI_BANDS:
+        if value <= upper:
+            return name
+    return "Extremely poor"
+
+
+def pollen_level(kind: str, grains: float) -> str:
+    """'Moderate' from POLLEN_LEVELS (low-to-moderate, moderate-to-high, high-to-very-high),
+    or '' for a type with no thresholds set."""
+    limits = POLLEN_LEVELS.get(kind.lower())
+    if not limits:
+        return ""
+    for limit, name in zip(limits, ("Low", "Moderate", "High")):
+        if grains < limit:
+            return name
+    return "Very high"
+
+
+def _fetch_air_sync(lat: float, lon: float) -> dict:
+    key = (round(lat, 2), round(lon, 2))
+    cached = _air_cache.get(key)
+    if cached is not None:
+        return cached
+    params = {
+        "latitude": f"{lat:.4f}", "longitude": f"{lon:.4f}",
+        "current": ",".join(["european_aqi"] + [k for k, _ in AIR_POLLUTANTS]),
+        "hourly": ",".join(k for k, _ in POLLEN_TYPES),
+        "forecast_days": 2, "timezone": str(TIMEZONE),
+    }
+    data = _http_get_json(f"{AIR_API}?{urllib.parse.urlencode(params)}")
+    _air_cache.put(key, data)
+    return data
+
+
+def format_air(data: dict, label: str, budget: Optional[int] = None) -> str:
+    """'🟢 Norwich air: Fair (EAQI 22) | PM2.5 5 PM10 9 NO2 7 O3 63 µg/m³ | Open-Meteo'."""
+    cur = data.get("current") or {}
+    aqi = cur.get("european_aqi")
+    band = eaqi_band(aqi)
+    head = (f"{EAQI_EMOJI.get(band, '❔')} {label} air: " if USE_EMOJI else f"{label} air: ") + band
+    if aqi is not None:
+        head += f" (EAQI {aqi:.0f})"
+    levels = " ".join(f"{name} {cur[k]:.0f}" for k, name in AIR_POLLUTANTS if cur.get(k) is not None)
+    unit = "µg/m³" if USE_EMOJI else "ug/m3"
+    parts = [head] + ([f"{levels} {unit}"] if levels else []) + [AIR_CREDIT]
+    text = " | ".join(parts)
+    budget = MAX_REPLY_BYTES if budget is None else budget
+    if len(text.encode("utf-8")) > budget:          # drop the pollutant detail before the index
+        text = " | ".join([head, AIR_CREDIT])
+    return text
+
+
+def pollen_peaks(data: dict, now: Optional[datetime] = None, hours: int = 24) -> dict[str, float]:
+    """Highest count of each pollen type over the next `hours`, in grains/m³."""
+    now = (now or datetime.now(TIMEZONE)).replace(tzinfo=None, minute=0, second=0, microsecond=0)
+    hourly = data.get("hourly") or {}
+    times = [datetime.fromisoformat(t) for t in hourly.get("time") or []]
+    wanted = {i for i, t in enumerate(times) if now <= t < now + timedelta(hours=hours)}
+    peaks = {}
+    for key, name in POLLEN_TYPES:
+        values = [v for i, v in enumerate(hourly.get(key) or []) if i in wanted and v is not None]
+        if values:
+            peaks[name] = max(values)
+    return peaks
+
+
+def format_pollen(peaks: dict[str, float], label: str, budget: Optional[int] = None) -> str:
+    """'🌼 Norwich pollen 24h: Grass 45 Moderate | Birch 12 grains/m³ | Open-Meteo'.
+    Types with no pollen are left out. Highest count first."""
+    budget = MAX_REPLY_BYTES if budget is None else budget
+    head = f"🌼 {label} pollen 24h: " if USE_EMOJI else f"{label} pollen 24h: "
+    unit = " grains/m³" if USE_EMOJI else " grains/m3"
+    tail = f" | {AIR_CREDIT}"
+    present = sorted(((n, v) for n, v in peaks.items() if round(v) > 0), key=lambda p: -p[1])
+    if not present:
+        return f"{head}None forecast{tail}"
+    items = []
+    for name, value in present:
+        items.append(f"{name} {value:.0f} {pollen_level(name, value)}".strip())
+        if len((head + " | ".join(items) + unit + tail).encode("utf-8")) > budget and len(items) > 1:
+            items.pop()
+            break
+    return head + " | ".join(items) + unit + tail
+
+
+async def get_air(query: str, mode: str = "aq", budget: Optional[int] = None,
+                  quiet: bool = False) -> Optional[str]:
+    """mode 'aq' for air quality, 'pollen' for the pollen forecast."""
+    tag = "AQ" if mode == "aq" else "POLLEN"
+    try:
+        lat, lon, label = await asyncio.to_thread(_geocode_sync, query)
+    except LocationError as ex:
+        _LOGGER.info("Location lookup failed for %r: %s", query, ex)
+        return None if quiet else f"{tag}: {ex}"
+    except Exception as ex:
+        _LOGGER.warning("Place lookup failed for %r: %s", query, ex)
+        return f"{tag}: place lookup failed"
+    try:
+        data = await asyncio.to_thread(_fetch_air_sync, lat, lon)
+    except Exception as ex:
+        _LOGGER.warning("Open-Meteo air quality failed for %s: %s", label, ex)
+        return f"{tag}: lookup failed"
+    if mode == "aq":
+        return format_air(data, label, budget=budget)
+    return format_pollen(pollen_peaks(data), label, budget=budget)
+
+
+# =====================================================================
 # Text helpers
 # =====================================================================
 def trim(text: str, limit: Optional[int] = None) -> str:
@@ -1402,10 +1541,11 @@ def split_sender(text: str) -> tuple[str, str]:
 PLAIN_COMMANDS = {"ping", "test"}
 # Commands that only work with a leading "!" (returned as "!name")
 BANG_COMMANDS = {"help", "roll", "flipacoin", "eightball", "wx", "wxh", "wxf",
-                 "warn", "sun", "moon", "aurora", "path", "stats", "uptime", "mute", "unmute", "say"}
+                 "warn", "sun", "moon", "aurora", "aq", "pollen", "path",
+                 "stats", "uptime", "mute", "unmute", "say"}
 COMMAND_ALIASES = {"8ball": "eightball", "flip": "flipacoin", "coin": "flipacoin", "dice": "roll",
                    "warnings": "warn", "sunrise": "sun", "sunset": "sun", "trace": "path",
-                   "solar": "aurora"}
+                   "solar": "aurora", "air": "aq"}
 
 
 def parse_command(body: str) -> tuple[str, str]:
@@ -1433,12 +1573,14 @@ async def expand_tokens(text: str) -> str:
     now = datetime.now(TIMEZONE)
     text = text.replace("{time}", now.strftime("%H:%M")).replace("{date}", now.strftime("%a %d %b"))
     modes = {"wx": "now", "wxh": "hours", "wxf": "daily"}
-    for m in list(re.finditer(r"\{(wx[hf]?|warn|sun)(?::([^}]*))?\}", text)):
+    for m in list(re.finditer(r"\{(wx[hf]?|warn|sun|aq|pollen)(?::([^}]*))?\}", text)):
         place = m.group(2) or ""
         if m.group(1) == "warn":
             replacement = await get_warnings(place)
         elif m.group(1) == "sun":
             replacement = await get_sun(place)
+        elif m.group(1) in ("aq", "pollen"):
+            replacement = await get_air(place, mode=m.group(1))
         else:
             replacement = await get_weather(place, mode=modes[m.group(1)])
         text = text.replace(m.group(0), replacement or "", 1)
@@ -1684,8 +1826,8 @@ async def scheduler(sender: Sender, entries: list[dict]) -> None:
 # =====================================================================
 # Command handling
 # =====================================================================
-HELP_TEXT = ("Cmds: ping, test, !wx/!wxh/!wxf [place], !warn [place], !sun [place], !moon, !aurora, !path, "
-             "!roll [2d6], !flip, !8ball <q>, !help")
+HELP_TEXT = ("Cmds: ping, test, !path, !wx/!wxh/!wxf/!warn/!sun/!aq/!pollen [place], !moon, !aurora, "
+             "!roll [2d6], !flip, !8ball <q>")
 # Only answered in a DM from a key in ADMIN_PUBKEYS. Channel messages carry no key,
 # so these are never answered in a channel.
 ADMIN_COMMANDS = {"!stats", "!uptime", "!mute", "!unmute", "!say"}
@@ -1823,6 +1965,9 @@ async def run_command(cmd: str, arg: str, sender_name: str, rx_info: dict[str, A
         return mention + format_moon()
     if cmd == "!aurora":
         return mention + await get_aurora()
+    if cmd in ("!aq", "!pollen"):
+        text = await get_air(arg, mode=cmd[1:], budget=budget, quiet=True)
+        return mention + text if text else None
     if cmd == "!stats":
         return mention + format_stats(await _battery_mv(), budget=budget)
     if cmd == "!uptime":
@@ -1966,6 +2111,7 @@ async def main(port: str) -> None:
             _wx_cache.cleanup()
             _geo_cache.cleanup()
             _warn_cache.cleanup()
+            _air_cache.cleanup()
             await refresh_contacts()
 
     tasks = [
@@ -2000,6 +2146,9 @@ if __name__ == "__main__":
     ap.add_argument("--sun", metavar="LOCATION", nargs="?", const="", help="print a !sun reply and exit (no radio)")
     ap.add_argument("--moon", action="store_true", help="print a !moon reply and exit (no radio)")
     ap.add_argument("--aurora", action="store_true", help="print an !aurora reply and exit (no radio)")
+    ap.add_argument("--aq", metavar="LOCATION", nargs="?", const="", help="print an !aq reply and exit (no radio)")
+    ap.add_argument("--pollen", metavar="LOCATION", nargs="?", const="",
+                    help="print a !pollen reply and exit (no radio)")
     args = ap.parse_args()
 
     loaded = load_config(args.config)
@@ -2021,6 +2170,10 @@ if __name__ == "__main__":
             print(trim(format_moon()))
         elif args.aurora:
             print(trim(asyncio.run(get_aurora())))
+        elif args.aq is not None:
+            print(trim(asyncio.run(get_air(args.aq, mode="aq")) or ""))
+        elif args.pollen is not None:
+            print(trim(asyncio.run(get_air(args.pollen, mode="pollen")) or ""))
         else:
             asyncio.run(main(args.port or SERIAL_PORT))
     except KeyboardInterrupt:
