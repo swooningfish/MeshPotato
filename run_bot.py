@@ -749,6 +749,11 @@ def _parse_time(s: str) -> datetime:
     return datetime.fromisoformat(s.replace("Z", "+00:00"))
 
 
+def wx_available() -> bool:
+    """The Met Office weather commands only run with an API key."""
+    return bool(MET_OFFICE_API_KEY)
+
+
 def _fetch_metoffice_sync(kind: str, lat: float, lon: float) -> dict:
     if not MET_OFFICE_API_KEY:
         raise RuntimeError("METOFFICE_API_KEY not set")
@@ -884,7 +889,11 @@ def format_hours(data: dict, label: str, hours: Optional[int] = None, step: Opti
 async def get_weather(query: str, mode: str = "now", budget: Optional[int] = None,
                       quiet: bool = False) -> Optional[str]:
     """mode: "now", "hours" or "daily".
-    quiet=True returns None instead of an error reply when the place isn't found."""
+    quiet=True returns None instead of an error reply when the place isn't found.
+    Returns None with no Met Office API key, so commands and {wx} tokens are skipped."""
+    if not wx_available():
+        _LOGGER.debug("No Met Office API key, weather lookup for %r skipped", query)
+        return None
     try:
         lat, lon, label = await asyncio.to_thread(_geocode_sync, query)
     except LocationError as ex:
@@ -1816,6 +1825,9 @@ async def scheduler(sender: Sender, entries: list[dict]) -> None:
                 continue
             _LOGGER.info("Schedule '%s' firing (%s)", entry.get("name", i), slot)
             text = await expand_tokens(entry["text"])
+            if not text.strip():                # e.g. "{wx}" alone with no Met Office API key
+                _LOGGER.info("Schedule '%s' skipped, nothing to send", entry.get("name", i))
+                continue
             if "channel" in entry:
                 sender.channel(int(entry["channel"]), text)
             else:
@@ -1826,14 +1838,24 @@ async def scheduler(sender: Sender, entries: list[dict]) -> None:
 # =====================================================================
 # Command handling
 # =====================================================================
-HELP_TEXT = ("Cmds: ping, test, !path, !wx/!wxh/!wxf/!warn/!sun/!aq/!pollen [place], !moon, !aurora, "
-             "!roll [2d6], !flip, !8ball <q>")
+WX_COMMANDS = ["!wx", "!wxh", "!wxf"]             # need a Met Office API key
+PLACE_COMMANDS = ["!warn", "!sun", "!aq", "!pollen"]
+
+
+def help_text() -> str:
+    """Command list. The weather commands are left out when there is no Met Office API key."""
+    place = "/".join((WX_COMMANDS if wx_available() else []) + PLACE_COMMANDS)
+    return f"Cmds: ping, test, !path, {place} [place], !moon, !aurora, !roll [2d6], !flip, !8ball <q>"
+
+
 # Only answered in a DM from a key in ADMIN_PUBKEYS. Channel messages carry no key,
 # so these are never answered in a channel.
 ADMIN_COMMANDS = {"!stats", "!uptime", "!mute", "!unmute", "!say"}
 
 
 def command_allowed(cmd: str, admin: bool) -> bool:
+    if cmd in WX_COMMANDS and not wx_available():
+        return False
     return admin or cmd not in ADMIN_COMMANDS
 
 
@@ -1945,7 +1967,7 @@ async def run_command(cmd: str, arg: str, sender_name: str, rx_info: dict[str, A
         return mention + format_path(rx_info, repeater_names(),
                                      budget=MAX_REPLY_BYTES - len(mention.encode("utf-8")))
     if cmd == "!help":
-        return HELP_TEXT
+        return help_text()
     if cmd == "!roll":
         return mention + roll_dice(arg)
     if cmd == "!flipacoin":
@@ -1992,7 +2014,8 @@ async def main(port: str) -> None:
     if not MET_OFFICE_API_KEY:
         _LOGGER.warning("Met Office API key not found (env METOFFICE_API_KEY, metoffice_api_key "
                         "in config.toml, ~/.config/meshcore/metoffice_key or metoffice_key.txt). "
-                        "!wx/!wxh/!wxf will reply with an error.")
+                        "!wx/!wxh/!wxf are ignored and left out of !help, and {wx} tokens "
+                        "in scheduled messages are left blank.")
     else:
         _LOGGER.info("Met Office API key loaded from %s (%d chars)",
                      MET_OFFICE_KEY_SOURCE, len(MET_OFFICE_API_KEY))
@@ -2042,7 +2065,8 @@ async def main(port: str) -> None:
         if not cmd:
             return
         if not command_allowed(cmd, admin):
-            _LOGGER.info("Ignored admin command %s from %s", cmd, user_key)
+            why = "no Met Office API key" if cmd in WX_COMMANDS else "admin only"
+            _LOGGER.info("Ignored %s from %s (%s)", cmd, user_key, why)
             return
         if not admin and mute_remaining() > 0:
             _LOGGER.info("Muted, ignoring %s from %s", cmd, user_key)
@@ -2156,6 +2180,8 @@ if __name__ == "__main__":
     if loaded:
         _LOGGER.info("Settings loaded from %s", loaded)
     try:
+        if not wx_available() and (args.wx, args.wxh, args.wxf) != (None, None, None):
+            raise SystemExit("No Met Office API key set, see section 3.5 of README.md")
         if args.wx is not None:
             print(trim(asyncio.run(get_weather(args.wx)) or ""))
         elif args.wxh is not None:

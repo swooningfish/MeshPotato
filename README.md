@@ -69,6 +69,14 @@ Short alias: `!trace` = `!path`.
 
 If the location can't be found, the bot doesn't reply. The failed lookup is still logged.
 
+The weather commands need a Met Office API key (see section 3.5). Without one, the bot:
+
+- ignores `!wx`, `!wxh` and `!wxf` from everyone, admins included, and doesn't reply
+- leaves them out of `!help`
+- leaves `{wx}`, `{wxh}` and `{wxf}` blank in scheduled messages, and skips a scheduled message that ends up empty
+
+Everything else keeps working. The startup log warns when no key is found.
+
 #### Warnings, sun and moon (`!` required)
 
 | Command | Reply |
@@ -489,7 +497,7 @@ The bot looks for the key in this order and uses the first it finds:
 4. `~/.config/meshcore/metoffice_key`
 5. `metoffice_key.txt` in the same folder as the script
 
-The startup log says which one it used.
+The startup log says which one it used. If it finds no key, the weather commands are switched off (see Weather in section 1).
 
 If `config.toml` holds a key, the installer sets the file to mode 600. Otherwise, if `METOFFICE_API_KEY` is set in your shell when you run the installer, it writes the key file for you.
 

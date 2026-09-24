@@ -338,9 +338,10 @@ def test_aq_unknown_place_is_silent(monkeypatch):
     assert asyncio.run(bot.get_air("nowhere", mode="pollen")) == "POLLEN: 'nowhere' not found"
 
 
-def test_help_fits_one_message():
-    assert "!path" in bot.HELP_TEXT
-    assert len(bot.HELP_TEXT.encode("utf-8")) <= bot.MAX_REPLY_BYTES
+def test_help_fits_one_message(monkeypatch):
+    monkeypatch.setattr(bot, "MET_OFFICE_API_KEY", "key")
+    assert "!path" in bot.help_text()
+    assert len(bot.help_text().encode("utf-8")) <= bot.MAX_REPLY_BYTES
 
 
 # ---------- commands ----------
@@ -363,6 +364,7 @@ def test_test_shows_rx_report(monkeypatch):
 def test_wx_unknown_place_is_silent(monkeypatch):
     def not_found(query):
         raise bot.LocationError(f"'{query}' not found")
+    monkeypatch.setattr(bot, "MET_OFFICE_API_KEY", "key")
     monkeypatch.setattr(bot, "_geocode_sync", not_found)
     assert asyncio.run(bot.run_command("!wx", "nowhere", "Alice", {})) is None
     # Scheduled messages and the CLI still get the error text
@@ -421,12 +423,46 @@ def test_fetch_uses_cache_and_budget(monkeypatch):
 
 
 def test_quota_reply(monkeypatch):
+    monkeypatch.setattr(bot, "MET_OFFICE_API_KEY", "key")
     monkeypatch.setattr(bot, "_geocode_sync", lambda q: (52.6, 1.3, "Norwich"))
 
     def over(kind, lat, lon):
         raise bot.QuotaError("300 calls used today")
     monkeypatch.setattr(bot, "_fetch_metoffice_sync", over)
     assert asyncio.run(bot.get_weather("")) == "WX: daily quota used, try tomorrow"
+
+
+def test_no_api_key_skips_weather(monkeypatch):
+    monkeypatch.setattr(bot, "MET_OFFICE_API_KEY", "")
+    monkeypatch.setattr(bot, "_geocode_sync", lambda q: pytest.fail("should not look up the place"))
+    for cmd in bot.WX_COMMANDS:
+        assert not bot.command_allowed(cmd, admin=False)
+        assert not bot.command_allowed(cmd, admin=True)          # admins too
+        assert asyncio.run(bot.run_command(cmd, "Cromer", "Alice", {})) is None
+    assert bot.command_allowed("!warn", admin=False)
+    assert asyncio.run(bot.get_weather("Cromer")) is None
+    assert asyncio.run(bot.expand_tokens("Morning {wx} {wxf:Cromer}")).strip() == "Morning"
+    help_text = bot.help_text()
+    assert "!wx" not in help_text and "!warn/!sun/!aq/!pollen [place]" in help_text
+    monkeypatch.setattr(bot, "MET_OFFICE_API_KEY", "key")
+    assert "!wx/!wxh/!wxf/!warn/!sun/!aq/!pollen [place]" in bot.help_text()
+    assert bot.command_allowed("!wx", admin=False)
+
+
+def test_schedule_skips_empty_message(monkeypatch):
+    sent = []
+    fake = type("FakeSender", (), {"channel": lambda self, ch, t: sent.append((ch, t)),
+                                   "dm": lambda self, k, t: sent.append((k, t))})()
+    monkeypatch.setattr(bot, "MET_OFFICE_API_KEY", "")
+    monkeypatch.setattr(bot, "_muted_until", 0.0)
+    monkeypatch.setattr(bot, "due_slot", lambda entry, now: "slot-1")
+
+    async def run_once():
+        task = asyncio.create_task(bot.scheduler(fake, [{"name": "x", "time": "07:30", "channel": 1, "text": "{wx}"}]))
+        await asyncio.sleep(0.05)
+        task.cancel()
+    asyncio.run(run_once())
+    assert sent == []
 
 
 # ---------- weather formatting ----------
@@ -741,12 +777,13 @@ def test_format_stats(monkeypatch):
     assert len(short.encode("utf-8")) <= 60 and "(" not in short
 
 
-def test_stats_and_uptime_are_admin_only():
+def test_stats_and_uptime_are_admin_only(monkeypatch):
+    monkeypatch.setattr(bot, "MET_OFFICE_API_KEY", "key")
     for cmd in ("!stats", "!uptime", "!mute", "!unmute", "!say"):
         assert not bot.command_allowed(cmd, admin=False)
         assert bot.command_allowed(cmd, admin=True)
     assert bot.command_allowed("!wx", admin=False)
-    assert "!stats" not in bot.HELP_TEXT and "!uptime" not in bot.HELP_TEXT
+    assert "!stats" not in bot.help_text() and "!uptime" not in bot.help_text()
 
 
 def test_mute_and_unmute(monkeypatch):
