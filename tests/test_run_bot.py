@@ -1,6 +1,8 @@
 import asyncio
 import time
-from datetime import datetime, timedelta, timezone
+from collections import Counter
+from datetime import date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -28,6 +30,13 @@ import run_bot as bot
     ("!dice 2d6", ("!roll", "2d6")),
     ("!8ball will it rain", ("!eightball", "will it rain")),
     ("!coin", ("!flipacoin", "")),
+    ("!warn", ("!warn", "")),
+    ("!warnings Cromer", ("!warn", "Cromer")),
+    ("!sunset NR1", ("!sun", "NR1")),
+    ("!moon", ("!moon", "")),
+    ("moon", ("", "")),
+    ("!stats", ("!stats", "")),
+    ("!uptime", ("!uptime", "")),
     ("!nothing", ("", "")),
     ("", ("", "")),
 ])
@@ -75,7 +84,8 @@ def test_roll_dice_rejects_bad_specs(arg):
 
 def test_eightball_needs_question():
     assert bot.eightball("").startswith("Ask a question")
-    assert any(a in bot.eightball("Will it rain?") for a in bot.EIGHTBALL_ANSWERS)
+    reply = bot.eightball("Will it rain?")
+    assert any(a in reply for a in bot.EIGHTBALL_ANSWERS)
 
 
 # ---------- path and signal info ----------
@@ -168,6 +178,20 @@ def test_wx_unknown_place_is_silent(monkeypatch):
     assert asyncio.run(bot.run_command("!wx", "nowhere", "Alice", {})) is None
     # Scheduled messages and the CLI still get the error text
     assert asyncio.run(bot.get_weather("nowhere")) == "WX: 'nowhere' not found"
+
+
+def test_place_lookup_prefers_bigger_exact_match(monkeypatch):
+    results = [
+        {"name_1": "Brighton", "local_type": "Hamlet", "latitude": 50.3, "longitude": -4.9},
+        {"name_1": "New Brighton", "local_type": "Town", "latitude": 53.4, "longitude": -3.0},
+        {"name_1": "Brighton", "local_type": "Other Settlement", "latitude": 50.8, "longitude": -0.1},
+        {"name_1": "Casnewydd", "name_2": "Newport", "local_type": "City", "latitude": 51.6, "longitude": -3.0},
+    ]
+    assert bot._best_place(results, "brighton")["latitude"] == 50.8
+    assert bot._best_place(results, "Nowhere")["latitude"] == 50.3        # no exact match: first result
+    monkeypatch.setattr(bot, "_geo_cache", bot.TTLCache(60))
+    monkeypatch.setattr(bot, "_http_get_json", lambda url, headers=None: {"result": results})
+    assert bot._geocode_sync("Newport") == (51.6, -3.0, "Newport")
 
 
 # ---------- rate limiting ----------
@@ -268,6 +292,152 @@ def test_validate_schedule_drops_bad_entries():
     assert [e["name"] for e in bot.validate_schedule(entries)] == ["ok"]
 
 
+# ---------- weather warnings ----------
+LONDON = ZoneInfo("Europe/London")
+WARN_FEED_XML = b"""<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0"><channel><title>Met Office warnings for East of England</title>
+<item><title>Yellow warning of rain affecting East of England</title>
+<description>Yellow warning of rain affecting East of England: Norfolk, Suffolk
+valid from 0600 Sat 26 Sep to 2100 Sat 26 Sep</description></item>
+<item><title>Amber warning of wind affecting East of England</title>
+<description>Norfolk valid from 1800 Thu 24 Sep to 1200 Fri 25 Sep</description></item>
+<item><title>Yellow warning of fog affecting East of England</title>
+<description>valid from 0000 Tue 22 Sep to 0900 Tue 22 Sep</description></item>
+</channel></rss>"""
+
+
+def test_parse_warnings_feed(monkeypatch):
+    monkeypatch.setattr(bot, "TIMEZONE", LONDON)
+    now = datetime(2026, 9, 24, 14, tzinfo=LONDON)
+    warnings = bot.parse_warnings_feed(WARN_FEED_XML, now)
+    assert [(w["level"], w["hazard"]) for w in warnings] == [("yellow", "rain"), ("amber", "wind"), ("yellow", "fog")]
+    assert warnings[0]["start"] == datetime(2026, 9, 26, 6, tzinfo=LONDON)
+    assert warnings[0]["end"] == datetime(2026, 9, 26, 21, tzinfo=LONDON)
+
+
+def test_warning_year_rolls_over(monkeypatch):
+    monkeypatch.setattr(bot, "TIMEZONE", LONDON)
+    t = bot._warn_time("06", "00", "02", "Jan", datetime(2026, 12, 30, tzinfo=LONDON))
+    assert t.year == 2027
+
+
+def test_format_warnings(monkeypatch):
+    monkeypatch.setattr(bot, "TIMEZONE", LONDON)
+    now = datetime(2026, 9, 24, 14, tzinfo=LONDON)
+    warnings = bot.parse_warnings_feed(WARN_FEED_XML, now)
+    out = bot.format_warnings(warnings, "ee", now=now)
+    # Amber first, expired fog warning left out
+    assert out == "⚠️ East of England: 🟠💨 Wind Thu 18:00-Fri 12:00 | 🟡🌧️ Rain Sat 06:00-21:00"
+    short = bot.format_warnings(warnings, "ee", budget=70, now=now)
+    assert short.endswith("+1 more") and len(short.encode("utf-8")) <= 70
+    monkeypatch.setattr(bot, "USE_EMOJI", False)
+    assert bot.format_warnings([], "ee", now=now) == "No warnings for East of England"
+
+
+@pytest.mark.parametrize("postcode, code", [
+    ({"country": "England", "region": "London"}, "se"),
+    ({"country": "England", "region": "East of England"}, "ee"),
+    ({"country": "Scotland", "region": None, "admin_district": "Glasgow City"}, "st"),
+    ({"country": "Wales", "region": None}, "wl"),
+    ({"country": "Isle of Man"}, "uk"),
+])
+def test_warn_region_from_postcode(monkeypatch, postcode, code):
+    monkeypatch.setattr(bot, "_geo_cache", bot.TTLCache(60))
+    monkeypatch.setattr(bot, "_geocode_sync", lambda q: (51.5, -0.1, "Somewhere"))
+    monkeypatch.setattr(bot, "_http_get_json", lambda url, headers=None: {"result": [postcode]})
+    assert bot._warn_region_sync("Somewhere") == code
+
+
+def test_warn_region_code_needs_no_lookup(monkeypatch):
+    monkeypatch.setattr(bot, "_geocode_sync", lambda q: pytest.fail("should not geocode"))
+    assert bot._warn_region_sync("NW") == "nw"
+    assert bot._warn_region_sync("uk") == "uk"
+
+
+def test_warn_unknown_place_is_silent(monkeypatch):
+    def not_found(query):
+        raise bot.LocationError(f"'{query}' not found")
+    monkeypatch.setattr(bot, "_geocode_sync", not_found)
+    assert asyncio.run(bot.run_command("!warn", "nowhere", "Alice", {})) is None
+
+
+# ---------- sun and moon ----------
+def test_sun_times_london_midsummer(monkeypatch):
+    monkeypatch.setattr(bot, "TIMEZONE", LONDON)
+    rise, set_, state = bot.sun_times(51.5074, -0.1278, date(2026, 6, 21))
+    assert state == ""
+    # Published times: 04:43 and 21:21 BST
+    assert abs(rise - datetime(2026, 6, 21, 4, 43, tzinfo=LONDON)) < timedelta(minutes=2)
+    assert abs(set_ - datetime(2026, 6, 21, 21, 21, tzinfo=LONDON)) < timedelta(minutes=2)
+
+
+def test_sun_polar_day():
+    assert bot.sun_times(78.2, 15.6, date(2026, 6, 21))[2] == "up"
+    assert bot.sun_times(78.2, 15.6, date(2026, 12, 21))[2] == "down"
+
+
+def test_format_sun(monkeypatch):
+    monkeypatch.setattr(bot, "TIMEZONE", LONDON)
+    out = bot.format_sun(51.5074, -0.1278, "London", date(2026, 6, 21))
+    assert out.startswith("London Sun 21 Jun 🌅 04:4") and "🌇 21:2" in out and "daylight" in out
+    monkeypatch.setattr(bot, "USE_EMOJI", False)
+    assert "sunrise 04:4" in bot.format_sun(51.5074, -0.1278, "London", date(2026, 6, 21))
+
+
+def test_next_full_moon():
+    # Published full moon: 26 Sep 2026 16:49 UTC
+    full = bot.next_moon_phase(datetime(2026, 9, 20, tzinfo=timezone.utc), 180)
+    assert abs(full - datetime(2026, 9, 26, 16, 49, tzinfo=timezone.utc)) < timedelta(hours=1)
+
+
+@pytest.mark.parametrize("when, emoji", [
+    (datetime(2026, 9, 26, 17, tzinfo=timezone.utc), "🌕"),     # full
+    (datetime(2026, 9, 23, 12, tzinfo=timezone.utc), "🌔"),     # waxing gibbous
+    (datetime(2026, 9, 30, 12, tzinfo=timezone.utc), "🌖"),     # waning gibbous
+    (datetime(2026, 10, 10, 16, tzinfo=timezone.utc), "🌑"),    # new
+    (datetime(2026, 10, 14, 12, tzinfo=timezone.utc), "🌒"),    # waxing crescent
+])
+def test_moon_phase_emoji(when, emoji):
+    idx, lit = bot.moon_phase(when)
+    assert bot.MOON_PHASES[idx][0] == emoji
+    assert 0 <= lit <= 100
+
+
+def test_format_moon(monkeypatch):
+    monkeypatch.setattr(bot, "TIMEZONE", LONDON)
+    out = bot.format_moon(datetime(2026, 9, 24, 12, tzinfo=LONDON))
+    assert out.startswith("🌔 Waxing gibbous") and "🌕 Full Sat 26 Sep" in out
+
+
+# ---------- stats and uptime ----------
+def test_duration():
+    assert bot._duration(42) == "42s"
+    assert bot._duration(125) == "2m"
+    assert bot._duration(3 * 3600 + 60) == "3h 1m"
+    assert bot._duration(2 * 86400 + 3600 + 120) == "2d 1h 2m"
+
+
+def test_format_stats(monkeypatch):
+    stats = bot.Stats()
+    stats.commands = Counter({"!wx": 5, "ping": 3, "test": 1, "!roll": 1})
+    stats.heard, stats.sent, stats.limited = 40, 9, 2
+    monkeypatch.setattr(bot, "_stats", stats)
+    out = bot.format_stats(battery_mv=4020)
+    assert out.startswith("📊 Cmds 10 (wx 5, ping 3,")
+    assert "Heard 40" in out and "Limited 2" in out and "🔋4.02V" in out
+    assert bot.format_stats(budget=70).startswith("📊 Cmds 10 (wx 5) |")   # list shortened to fit
+    short = bot.format_stats(budget=60)
+    assert len(short.encode("utf-8")) <= 60 and "(" not in short
+
+
+def test_uptime_reply(monkeypatch):
+    stats = bot.Stats()
+    stats.started -= 3700
+    monkeypatch.setattr(bot, "_stats", stats)
+    monkeypatch.setattr(bot, "_host_uptime", lambda: None)
+    assert asyncio.run(bot.run_command("!uptime", "", "Alice", {})).startswith("@[Alice] ⏱️ Bot up 1h 1m")
+
+
 # ---------- config.toml ----------
 @pytest.fixture
 def restore_settings():
@@ -278,6 +448,7 @@ def restore_settings():
         setattr(bot, name, value)
     bot._wx_cache.ttl = bot.WX_CACHE_SEC
     bot._geo_cache.ttl = bot.GEOCODE_CACHE_SEC
+    bot._warn_cache.ttl = bot.WARN_CACHE_SEC
 
 
 @pytest.mark.skipif(bot.tomllib is None, reason="needs Python 3.11+")

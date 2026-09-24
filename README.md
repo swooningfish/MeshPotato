@@ -1,6 +1,6 @@
 # MeshPotato 🥔: MeshCore WX, Ping, Bot
 
-A MeshCore chat bot for a Raspberry Pi running Arch Linux ARM. It answers ping and test commands, posts Met Office weather, rate limits spam and sends scheduled messages. It runs as a systemd service and starts on boot.
+A MeshCore chat bot for a Raspberry Pi running Arch Linux ARM. It answers ping and test commands, posts Met Office weather and weather warnings, gives sunrise, sunset and moon phase, reports its own stats, rate limits spam and sends scheduled messages. It runs as a systemd service and starts on boot.
 
 Files in this repo:
 
@@ -53,6 +53,24 @@ The hop count comes from the message itself. The path addresses aren't shown, be
 
 If the location can't be found, the bot doesn't reply. The failed lookup is still logged.
 
+#### Warnings, sun and moon (`!` required)
+
+| Command | Reply |
+|---------|-------|
+| `!warn` / `!warn <location>` | Met Office weather warnings for the region |
+| `!warn <region code>` | Warnings for a region, for example `!warn nw` or `!warn uk` |
+| `!sun` / `!sun <location>` | Sunrise, sunset and hours of daylight today |
+| `!moon` | Moon phase, how much is lit, and the next full and new moon |
+
+Short aliases: `!warnings` = `!warn`, `!sunrise` and `!sunset` = `!sun`.
+
+#### Bot status (`!` required)
+
+| Command | Reply |
+|---------|-------|
+| `!stats` | Commands served, messages heard and sent, rate limited commands, Met Office calls used today, radio battery |
+| `!uptime` | How long the bot has been running, and how long the Pi has been up |
+
 #### Fun and help (`!` required)
 
 | Command | Reply |
@@ -78,7 +96,7 @@ Short aliases: `!dice` = `!roll`, `!flip` and `!coin` = `!flipacoin`, `!8ball` =
 
 Dice, coin and eight ball use Python's `SystemRandom`, which draws on the operating system's random source.
 
-The fun commands count toward the same rate limits as the weather commands.
+The fun, warning, sun, moon and status commands count toward the same rate limits as the weather commands.
 
 `<location>` accepts:
 
@@ -88,7 +106,7 @@ The fun commands count toward the same rate limits as the weather commands.
 - A UK town or village: `!wx Cromer`
 - Latitude and longitude: `!wx 52.63,1.30`
 
-Postcodes and place names are looked up on postcodes.io, which is free and needs no key.
+Postcodes and place names are looked up on postcodes.io, which is free and needs no key. Its place names cover Great Britain only. For Northern Ireland, use a postcode: `!wx BT1 1AA`. When several places share a name, the bot picks the biggest one, so `!wx Brighton` is the city rather than the hamlet in Cornwall.
 
 ### Example replies
 
@@ -129,6 +147,85 @@ To cover a longer period in one message, space the hours out with `WXH_STEP_HOUR
 | `3` | The next 12 hours |
 
 `!wxh` uses the same Met Office hourly data as `!wx`, so a `!wx` and a `!wxh` for the same place within 30 minutes cost one API call.
+
+### Weather warnings (!warn)
+
+`!warn` reads the Met Office warnings RSS feed. It is free, needs no key and doesn't count toward the Met Office DataHub call budget. Each feed is cached for 10 minutes (`WARN_CACHE_SEC`).
+
+```
+⚠️ East of England: 🟠💨 Wind Thu 18:00-Fri 12:00 | 🟡🌧️ Rain Sat 06:00-21:00
+✅ No warnings for East of England
+```
+
+| Symbol | Meaning |
+|--------|---------|
+| 🔴 🟠 🟡 | Red, amber or yellow warning. Red is listed first |
+| 🌧️ 💨 ❄️ 🧊 ⛈️ ⚡ 🌫️ 🌡️ | Rain, wind, snow, ice, thunderstorms, lightning, fog, extreme heat |
+| `Thu 18:00-Fri 12:00` | When the warning is valid |
+| `to Fri 12:00` | The warning has already started |
+| `+2 more` | More warnings than fit in one message |
+
+Warnings that have ended are left out.
+
+The Met Office issues warnings for 16 regions. The bot finds the region for a location by looking up the nearest postcode on postcodes.io. With no location it uses `DEFAULT_LOCATION`. You can also give a region code:
+
+| Code | Region | Code | Region |
+|------|--------|------|--------|
+| `uk` | Whole UK | `ni` | Northern Ireland |
+| `os` | Orkney & Shetland | `wl` | Wales |
+| `he` | Highlands & Eilean Siar | `nw` | North West England |
+| `gr` | Grampian | `ne` | North East England |
+| `st` | Strathclyde | `yh` | Yorkshire & Humber |
+| `ta` | Central, Tayside & Fife | `wm` | West Midlands |
+| `dg` | SW Scotland, Lothian & Borders | `em` | East Midlands |
+| `ee` | East of England | `sw` | South West England |
+| `se` | London & South East England | | |
+
+A place with no postcode within 2 km (for example out at sea) gets no reply. A place the bot can't match to a region gets the whole UK list.
+
+### Sun and moon (!sun, !moon)
+
+The bot works these out itself, so they need no internet except to look up a place name.
+
+```
+Norwich Thu 24 Sep 🌅 06:43 🌇 18:50 ☀️ 12h06m daylight
+🌔 Waxing gibbous, 95% lit | 🌕 Full Sat 26 Sep | 🌑 New Sat 10 Oct
+```
+
+Sunrise and sunset are for today in `TIMEZONE` and are accurate to about a minute. They are when the top of the sun meets a flat horizon, so hills and buildings make the real times a little different.
+
+The moon emoji matches the phase as seen from the UK:
+
+| Emoji | Phase |
+|-------|-------|
+| 🌑 | New moon |
+| 🌒 | Waxing crescent |
+| 🌓 | First quarter |
+| 🌔 | Waxing gibbous |
+| 🌕 | Full moon |
+| 🌖 | Waning gibbous |
+| 🌗 | Last quarter |
+| 🌘 | Waning crescent |
+
+New moon, first quarter, full moon and last quarter are shown for about a day either side of the exact time. The in-between phases fill the days between. Full and new moon dates are accurate to within an hour, so a phase that falls just before or after midnight can show the wrong day.
+
+### Stats and uptime (!stats, !uptime)
+
+```
+📊 Cmds 42 (wx 20, ping 12, test 5) | Heard 310 | Sent 45 | Limited 3 | WX API 18/300 | 🔋4.02V
+⏱️ Bot up 3d 4h 12m (since Mon 21 Sep 09:14) | System up 12d 3h 40m
+```
+
+| Field | Meaning |
+|-------|---------|
+| Cmds | Commands answered, with the busiest ones. The list shortens to fit |
+| Heard | Messages heard on the listening channels and in DMs |
+| Sent | Messages sent by the bot. `Failed` appears if any sends failed |
+| Limited | Commands dropped by a rate limit |
+| WX API | Met Office calls today out of `WX_DAILY_CALL_BUDGET` |
+| 🔋 | Radio battery voltage, if the radio reports it |
+
+Counts start at 0 each time the bot starts. `System up` comes from `/proc/uptime`, so it only shows on Linux.
 
 ### Rate limiting
 
@@ -314,6 +411,7 @@ The bot reads `config.toml` from the folder `run_bot.py` is in. To use another f
 | `wxh_hours` | `6` | Most hours `!wxh` shows, if they fit |
 | `wxh_step_hours` | `1` | Gap between `!wxh` entries in hours |
 | `wxh_mention_reserve` | `25` | Bytes kept free for other text when `{wxh}` is used in a scheduled message |
+| `warn_cache_sec` | `600` | How long to reuse the Met Office warnings feed (10 minutes) |
 | `max_reply_bytes` | `135` | MeshCore limits messages by bytes. Emojis take 4 to 7 bytes each |
 | `wx_cache_sec` | `1800` | How long to reuse a forecast (30 minutes) |
 | `wx_daily_call_budget` | `300` | Most Met Office calls per UTC day |
@@ -352,6 +450,9 @@ Tokens filled in at send time:
 | `{wx:Cambridge}` | Current weather for Cambridge |
 | `{wxh}` / `{wxh:Ipswich}` | Hourly outlook |
 | `{wxf}` / `{wxf:Ipswich}` | 3-day forecast |
+| `{warn}` / `{warn:Ipswich}` | Weather warnings for the region |
+| `{sun}` / `{sun:Ipswich}` | Sunrise, sunset and daylight |
+| `{moon}` | Moon phase |
 
 Example:
 
@@ -409,6 +510,15 @@ Check the Met Office side without the radio:
 python run_bot.py --wx norwich
 python run_bot.py --wxh norwich
 python run_bot.py --wxf "NR1 3JU"
+```
+
+Check warnings, sun and moon the same way. Leave out the location to use `DEFAULT_LOCATION`:
+
+```bash
+python run_bot.py --warn
+python run_bot.py --warn Cromer
+python run_bot.py --sun NR1
+python run_bot.py --moon
 ```
 
 Run the full bot in the foreground (Ctrl+C to stop):

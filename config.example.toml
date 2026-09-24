@@ -29,6 +29,7 @@
 # use_mph = true
 # wxh_hours = 6
 # wxh_step_hours = 1
+# warn_cache_sec = 600             # reuse the Met Office warnings feed for 10 min
 
 # Named places for !wx <name>. This replaces the built-in list.
 # [locations]

@@ -10,6 +10,11 @@ Commands (channel or direct message):
   !wx [location]     -> Current conditions from Met Office DataHub (hourly)
   !wxh [location]    -> Next few hours, hour by hour (hourly)
   !wxf [location]    -> 3-day forecast from Met Office DataHub (daily)
+  !warn [location]   -> Met Office weather warnings for the region
+  !sun [location]    -> Sunrise, sunset and hours of daylight today
+  !moon              -> Moon phase, % lit and the next full and new moon
+  !stats             -> Commands served, messages heard, Met Office calls used
+  !uptime            -> How long the bot (and the computer) has been up
   !help              -> Command list                       (the ! is required)
   !roll [NdS+M]      -> Roll dice: !roll, !roll d20, !roll 2d6+3
   !flipacoin         -> Heads or tails
@@ -44,13 +49,15 @@ import logging
 import os
 import random
 import re
+import math
 import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections import defaultdict, deque
-from datetime import datetime, timedelta, timezone
+import xml.etree.ElementTree as ET
+from collections import Counter, defaultdict, deque
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable, Optional
 from zoneinfo import ZoneInfo
 
@@ -95,6 +102,7 @@ USE_MPH = True                  # False = m/s
 WXH_HOURS = 6                   # wxh: max hours to show (cut to fit MAX_REPLY_BYTES)
 WXH_STEP_HOURS = 1              # wxh: 1 = every hour, 2 = every 2 hours, 3 = every 3 hours
 WXH_MENTION_RESERVE = 25        # wxh: bytes kept free for text around {wxh} in schedules
+WARN_CACHE_SEC = 600            # reuse the Met Office warnings feed for 10 min
 
 # ---------- Rate limits: (max_events, window_seconds) ----------
 RATE_LIMIT_GLOBAL = (20, 60)        # all commands across the bot
@@ -129,6 +137,7 @@ EIGHTBALL_ANSWERS = [
 #   "at": "YYYY-MM-DD HH:MM"        one-shot local timestamp
 #   "every_minutes": N              repeating interval, optional "start": "HH:MM"
 # Text tokens: {time} {date} {wx} {wx:place} {wxh} {wxh:place} {wxf} {wxf:place}
+#              {warn} {warn:place} {sun} {sun:place} {moon}
 SCHEDULED_MESSAGES: list[dict[str, Any]] = [
     {"name": "morning-wx", "time": "07:30", "days": ["mon", "tue", "wed", "thu", "fri"],
      "channel": 1, "text": "Morning WX {wx}"},
@@ -223,6 +232,7 @@ _CONFIG_SETTINGS: dict[str, Optional[Callable[[Any], Any]]] = {
     "WXH_HOURS": None,
     "WXH_STEP_HOURS": None,
     "WXH_MENTION_RESERVE": None,
+    "WARN_CACHE_SEC": None,
     "RATE_LIMIT_GLOBAL": _pair,
     "RATE_LIMIT_PER_USER": _pair,
     "RATE_LIMIT_PER_CHANNEL": _pair,
@@ -278,6 +288,7 @@ def load_config(path: Optional[str] = None) -> Optional[str]:
         MET_OFFICE_KEY_SOURCE = path
     _wx_cache.ttl = WX_CACHE_SEC
     _geo_cache.ttl = GEOCODE_CACHE_SEC
+    _warn_cache.ttl = WARN_CACHE_SEC
     return path
 
 
@@ -456,14 +467,18 @@ class RateLimiter:
 # =====================================================================
 # HTTP helpers
 # =====================================================================
-def _http_get_json(url: str, headers: Optional[dict] = None) -> Any:
+def _http_get(url: str, headers: Optional[dict] = None, accept: str = "application/json") -> bytes:
     req = urllib.request.Request(
         url,
-        headers={"User-Agent": "meshcore-meshpotato-bot/1.0", "Accept": "application/json", **(headers or {})},
+        headers={"User-Agent": "meshcore-meshpotato-bot/1.0", "Accept": accept, **(headers or {})},
         method="GET",
     )
     with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+        return resp.read()
+
+
+def _http_get_json(url: str, headers: Optional[dict] = None) -> Any:
+    return json.loads(_http_get(url, headers).decode("utf-8"))
 
 
 class TTLCache:
@@ -502,6 +517,20 @@ class LocationError(Exception):
     """The place can't be found. Commands stay quiet about these."""
 
 
+# Bigger places win when several share a name ("Brighton" the city, not the hamlet in Cornwall)
+PLACE_TYPE_RANK = {"City": 0, "Town": 1, "Other Settlement": 2, "Suburban Area": 3, "Village": 4, "Hamlet": 5}
+
+
+def _best_place(results: list[dict], query: str) -> dict:
+    """Pick the biggest place whose name matches exactly, else postcodes.io's first result."""
+    q = query.strip().lower()
+    exact = [r for r in results
+             if q in ((r.get("name_1") or "").lower(), (r.get("name_2") or "").lower())]
+    if not exact:
+        return results[0]
+    return min(exact, key=lambda r: PLACE_TYPE_RANK.get(r.get("local_type"), len(PLACE_TYPE_RANK)))
+
+
 def _geocode_sync(query: str) -> tuple[float, float, str]:
     q = query.strip() or DEFAULT_LOCATION
     key = q.lower()
@@ -534,12 +563,13 @@ def _geocode_sync(query: str) -> tuple[float, float, str]:
             r = data["result"]
             out = (r["latitude"], r["longitude"], r["outcode"])
         else:
-            data = _http_get_json(f"{base}/places?q={urllib.parse.quote(q)}&limit=1")
+            data = _http_get_json(f"{base}/places?q={urllib.parse.quote(q)}&limit=20")
             res = data.get("result") or []
             if not res:
                 raise LocationError(f"'{q}' not found")
-            r = res[0]
-            out = (r["latitude"], r["longitude"], r.get("name_1") or q.title())
+            r = _best_place(res, q)
+            name = r.get("name_2") if (r.get("name_2") or "").lower() == q.lower() else r.get("name_1")
+            out = (r["latitude"], r["longitude"], name or q.title())
     except urllib.error.HTTPError as ex:
         if ex.code == 404:
             raise LocationError(f"'{q}' not found")
@@ -591,6 +621,10 @@ class CallBudget:
         self._lock = threading.Lock()
         self._day = None
         self.used = 0
+
+    def used_today(self) -> int:
+        with self._lock:
+            return self.used if self._day == datetime.now(timezone.utc).date() else 0
 
     def take(self) -> bool:
         today = datetime.now(timezone.utc).date()
@@ -804,6 +838,318 @@ async def get_weather(query: str, mode: str = "now", budget: Optional[int] = Non
 
 
 # =====================================================================
+# Weather warnings (Met Office RSS, free, no key, not counted in the call budget)
+# =====================================================================
+WARN_FEED = "https://www.metoffice.gov.uk/public/data/PWSCache/WarningsRSS/Region/"
+WARN_REGIONS = {
+    "uk": "UK", "os": "Orkney & Shetland", "he": "Highlands & Eilean Siar", "gr": "Grampian",
+    "st": "Strathclyde", "ta": "Central, Tayside & Fife", "dg": "SW Scotland, Lothian & Borders",
+    "ni": "Northern Ireland", "wl": "Wales", "nw": "North West England", "ne": "North East England",
+    "yh": "Yorkshire & Humber", "wm": "West Midlands", "em": "East Midlands",
+    "ee": "East of England", "sw": "South West England", "se": "London & South East England",
+}
+# postcodes.io region (England) or country -> Met Office warning region
+_WARN_BY_REGION = {
+    "north east": "ne", "north west": "nw", "yorkshire and the humber": "yh",
+    "east midlands": "em", "west midlands": "wm", "east of england": "ee",
+    "london": "se", "south east": "se", "south west": "sw",
+    "wales": "wl", "northern ireland": "ni",
+}
+# Scottish council (postcodes.io admin_district) -> Met Office warning region
+_WARN_BY_SCOTTISH_COUNCIL = {
+    "orkney islands": "os", "shetland islands": "os",
+    "highland": "he", "na h-eileanan siar": "he",
+    "aberdeen city": "gr", "aberdeenshire": "gr", "moray": "gr",
+    "angus": "ta", "dundee city": "ta", "perth and kinross": "ta", "fife": "ta",
+    "clackmannanshire": "ta", "falkirk": "ta", "stirling": "ta",
+    "argyll and bute": "st", "east ayrshire": "st", "north ayrshire": "st", "south ayrshire": "st",
+    "east dunbartonshire": "st", "west dunbartonshire": "st", "east renfrewshire": "st",
+    "renfrewshire": "st", "inverclyde": "st", "glasgow city": "st",
+    "north lanarkshire": "st", "south lanarkshire": "st",
+    "dumfries and galloway": "dg", "scottish borders": "dg", "city of edinburgh": "dg",
+    "east lothian": "dg", "midlothian": "dg", "west lothian": "dg",
+}
+WARN_LEVELS = {"red": 0, "amber": 1, "yellow": 2}
+WARN_LEVEL_EMOJI = {"red": "🔴", "amber": "🟠", "yellow": "🟡"}
+WARN_HAZARD_EMOJI = [("thunder", "⛈️"), ("lightning", "⚡"), ("rain", "🌧️"), ("snow", "❄️"),
+                     ("ice", "🧊"), ("wind", "💨"), ("fog", "🌫️"), ("heat", "🌡️")]
+WARN_TITLE_RE = re.compile(r"^(yellow|amber|red)\s+warning\s+of\s+(.+?)(?:\s+affecting\s+(.+))?$", re.I)
+WARN_VALID_RE = re.compile(r"valid from (\d{2})(\d{2}) \w{3} (\d{1,2}) (\w{3}) to (\d{2})(\d{2}) \w{3} (\d{1,2}) (\w{3})",
+                           re.I)
+_MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"]
+
+_warn_cache = TTLCache(WARN_CACHE_SEC)
+
+
+def _warn_time(hh: str, mm: str, day: str, mon: str, now: datetime) -> Optional[datetime]:
+    """The feed gives '0600 Sat 04 Nov' with no year. Pick the year that lands closest to now."""
+    try:
+        month = _MONTHS.index(mon.lower()[:3]) + 1
+        options = [datetime(y, month, int(day), int(hh), int(mm), tzinfo=TIMEZONE)
+                   for y in (now.year - 1, now.year, now.year + 1)]
+    except ValueError:
+        return None
+    return min(options, key=lambda t: abs(t - now))
+
+
+def parse_warning(title: str, description: str, now: Optional[datetime] = None) -> Optional[dict]:
+    m = WARN_TITLE_RE.match(" ".join(title.split()))
+    if not m:
+        return None
+    now = now or datetime.now(TIMEZONE)
+    w = {"level": m.group(1).lower(), "hazard": m.group(2).strip(),
+         "area": (m.group(3) or "").strip(), "start": None, "end": None}
+    v = WARN_VALID_RE.search(description or "")
+    if v:
+        w["start"] = _warn_time(*v.group(1, 2, 3, 4), now)
+        w["end"] = _warn_time(*v.group(5, 6, 7, 8), now)
+    return w
+
+
+def parse_warnings_feed(xml_bytes: bytes, now: Optional[datetime] = None) -> list[dict]:
+    root = ET.fromstring(xml_bytes)
+    out = []
+    for item in root.iter("item"):
+        w = parse_warning(item.findtext("title") or "", item.findtext("description") or "", now)
+        if w:
+            out.append(w)
+    return out
+
+
+def _warn_region_sync(query: str) -> str:
+    """Met Office region code for a region code, a place or DEFAULT_LOCATION."""
+    q = query.strip().lower()
+    if q in WARN_REGIONS and q not in {k.lower() for k in LOCATIONS}:
+        return q
+    lat, lon, _ = _geocode_sync(query)
+    key = ("warn-region", round(lat, 3), round(lon, 3))
+    cached = _geo_cache.get(key)
+    if cached:
+        return cached
+    data = _http_get_json(f"https://api.postcodes.io/postcodes?lon={lon:.5f}&lat={lat:.5f}&limit=1&radius=2000")
+    res = data.get("result") or []
+    if not res:
+        raise LocationError(f"no UK postcode near {lat:.2f},{lon:.2f}")
+    r = res[0]
+    country = (r.get("country") or "").lower()
+    if country == "scotland":
+        code = _WARN_BY_SCOTTISH_COUNCIL.get((r.get("admin_district") or "").lower())
+    elif country == "england":
+        code = _WARN_BY_REGION.get((r.get("region") or "").lower())
+    else:
+        code = _WARN_BY_REGION.get(country)
+    code = code or "uk"
+    _geo_cache.put(key, code)
+    return code
+
+
+def _fetch_warnings_sync(code: str) -> list[dict]:
+    cached = _warn_cache.get(code)
+    if cached is not None:
+        return cached
+    body = _http_get(WARN_FEED + code, accept="application/rss+xml, application/xml")
+    warnings = parse_warnings_feed(body)
+    _warn_cache.put(code, warnings)
+    return warnings
+
+
+def _warn_span(start: Optional[datetime], end: Optional[datetime], now: datetime) -> str:
+    if not end:
+        return ""
+    if not start or start <= now:
+        return f"to {end:%a %H:%M}"
+    if start.date() == end.date():
+        return f"{start:%a %H:%M}-{end:%H:%M}"
+    return f"{start:%a %H:%M}-{end:%a %H:%M}"
+
+
+def format_warnings(warnings: list[dict], code: str, budget: Optional[int] = None,
+                    now: Optional[datetime] = None) -> str:
+    budget = MAX_REPLY_BYTES if budget is None else budget
+    now = now or datetime.now(TIMEZONE)
+    region = WARN_REGIONS.get(code, code)
+    live = [w for w in warnings if not w["end"] or w["end"] > now]
+    if not live:
+        return f"✅ No warnings for {region}" if USE_EMOJI else f"No warnings for {region}"
+    live.sort(key=lambda w: (WARN_LEVELS.get(w["level"], 9), w["start"] or now))
+    items = []
+    for w in live:
+        hazard = w["hazard"].capitalize()
+        span = _warn_span(w["start"], w["end"], now)
+        area = f" ({w['area']})" if code == "uk" and w["area"] else ""
+        if USE_EMOJI:
+            icons = "".join(e for word, e in WARN_HAZARD_EMOJI if word in w["hazard"].lower())
+            items.append(f"{WARN_LEVEL_EMOJI.get(w['level'], '⚠️')}{icons} {hazard} {span}{area}".strip())
+        else:
+            items.append(f"{w['level'].capitalize()} {hazard.lower()} {span}{area}".strip())
+    text = (f"⚠️ {region}: " if USE_EMOJI else f"Warnings {region}: ")
+    shown = 0
+    for i, item in enumerate(items):
+        rest = len(items) - i - 1
+        more = f" +{rest} more" if rest else ""
+        candidate = text + (" | " if shown else "") + item
+        if len((candidate + more).encode("utf-8")) > budget:
+            break
+        text = candidate
+        shown += 1
+    if not shown:                   # one long warning: send it and let trim() cut it
+        return text + items[0]
+    if shown < len(items):
+        text += f" +{len(items) - shown} more"
+    return text
+
+
+async def get_warnings(query: str, budget: Optional[int] = None, quiet: bool = False) -> Optional[str]:
+    try:
+        code = await asyncio.to_thread(_warn_region_sync, query)
+    except LocationError as ex:
+        _LOGGER.info("Warning region lookup failed for %r: %s", query, ex)
+        return None if quiet else f"WARN: {ex}"
+    except Exception as ex:
+        _LOGGER.warning("Warning region lookup failed for %r: %s", query, ex)
+        return "WARN: place lookup failed"
+    try:
+        warnings = await asyncio.to_thread(_fetch_warnings_sync, code)
+    except Exception as ex:
+        _LOGGER.warning("Met Office warnings feed failed for %s: %s", code, ex)
+        return "WARN: lookup failed"
+    return format_warnings(warnings, code, budget=budget)
+
+
+# =====================================================================
+# Sun and moon (worked out locally, no API calls)
+# =====================================================================
+J2000 = 2451545.0
+J2000_UTC = datetime(2000, 1, 1, 12, tzinfo=timezone.utc)
+
+
+def _jd(dt: datetime) -> float:
+    return J2000 + (dt - J2000_UTC).total_seconds() / 86400
+
+
+def _from_jd(jd: float) -> datetime:
+    return J2000_UTC + timedelta(days=jd - J2000)
+
+
+def sun_times(lat: float, lon: float, day: date,
+              altitude: float = -0.833) -> tuple[Optional[datetime], Optional[datetime], str]:
+    """(sunrise, sunset, state) for a local date, from the sunrise equation (about 1 minute accurate).
+    state is "" normally, "up" when the sun never sets and "down" when it never rises."""
+    noon = datetime(day.year, day.month, day.day, 12, tzinfo=TIMEZONE)
+    n = round(_jd(noon.astimezone(timezone.utc)) - J2000 + lon / 360)   # nearest solar noon
+    j_star = n - lon / 360
+    m = math.radians((357.5291 + 0.98560028 * j_star) % 360)
+    c = 1.9148 * math.sin(m) + 0.0200 * math.sin(2 * m) + 0.0003 * math.sin(3 * m)
+    lam = math.radians((math.degrees(m) + c + 180 + 102.9372) % 360)
+    transit = J2000 + j_star + 0.0053 * math.sin(m) - 0.0069 * math.sin(2 * lam)
+    decl = math.asin(math.sin(lam) * math.sin(math.radians(23.4397)))
+    phi = math.radians(lat)
+    cos_w = ((math.sin(math.radians(altitude)) - math.sin(phi) * math.sin(decl))
+             / (math.cos(phi) * math.cos(decl)))
+    if cos_w < -1:
+        return None, None, "up"
+    if cos_w > 1:
+        return None, None, "down"
+    w = math.degrees(math.acos(cos_w)) / 360
+    return (_from_jd(transit - w).astimezone(TIMEZONE),
+            _from_jd(transit + w).astimezone(TIMEZONE), "")
+
+
+def _hm_length(td: timedelta) -> str:
+    mins = int(td.total_seconds() // 60)
+    return f"{mins // 60}h{mins % 60:02d}m"
+
+
+def format_sun(lat: float, lon: float, label: str, day: Optional[date] = None) -> str:
+    day = day or datetime.now(TIMEZONE).date()
+    rise, set_, state = sun_times(lat, lon, day)
+    head = f"{label} {day:%a %d %b}"
+    if state:
+        msg = "sun up all day" if state == "up" else "sun down all day"
+        return f"☀️ {head}: {msg}" if USE_EMOJI else f"{head}: {msg}"
+    length = _hm_length(set_ - rise)
+    if USE_EMOJI:
+        return f"{head} 🌅 {rise:%H:%M} 🌇 {set_:%H:%M} ☀️ {length} daylight"
+    return f"{head}: sunrise {rise:%H:%M} sunset {set_:%H:%M}, {length} daylight"
+
+
+async def get_sun(query: str, quiet: bool = False) -> Optional[str]:
+    try:
+        lat, lon, label = await asyncio.to_thread(_geocode_sync, query)
+    except LocationError as ex:
+        _LOGGER.info("Location lookup failed for %r: %s", query, ex)
+        return None if quiet else f"SUN: {ex}"
+    except Exception as ex:
+        _LOGGER.warning("Place lookup failed for %r: %s", query, ex)
+        return "SUN: place lookup failed"
+    return format_sun(lat, lon, label)
+
+
+MOON_PHASES = [
+    ("🌑", "New moon"), ("🌒", "Waxing crescent"), ("🌓", "First quarter"), ("🌔", "Waxing gibbous"),
+    ("🌕", "Full moon"), ("🌖", "Waning gibbous"), ("🌗", "Last quarter"), ("🌘", "Waning crescent"),
+]
+MOON_PRINCIPAL_DEG = 12         # within this of new, quarter or full counts as that phase (about a day)
+
+
+def moon_elongation(dt: datetime) -> float:
+    """Moon's ecliptic longitude minus the sun's, 0-360 degrees (0 new, 180 full).
+    Low-precision series, good to about 0.3 degrees (under an hour of phase)."""
+    d = _jd(dt) - J2000
+    rad = math.radians
+    g = rad(357.528 + 0.9856003 * d)
+    sun = 280.460 + 0.9856474 * d + 1.915 * math.sin(g) + 0.020 * math.sin(2 * g)
+    mm = rad(134.963 + 13.064993 * d)
+    dd = rad(297.850 + 12.190749 * d)
+    ff = rad(93.272 + 13.229350 * d)
+    moon = (218.316 + 13.176396 * d + 6.289 * math.sin(mm) - 1.274 * math.sin(mm - 2 * dd)
+            + 0.658 * math.sin(2 * dd) + 0.214 * math.sin(2 * mm) - 0.186 * math.sin(g)
+            - 0.114 * math.sin(2 * ff))
+    return (moon - sun) % 360
+
+
+def moon_phase(dt: datetime) -> tuple[int, int]:
+    """(index into MOON_PHASES, percent of the disc lit)."""
+    e = moon_elongation(dt)
+    lit = round((1 - math.cos(math.radians(e))) / 2 * 100)
+    nearest = round(e / 90) % 4
+    if abs((e - nearest * 90 + 180) % 360 - 180) <= MOON_PRINCIPAL_DEG:
+        return nearest * 2, lit
+    return int(e // 90) * 2 + 1, lit
+
+
+def next_moon_phase(dt: datetime, target_deg: float) -> datetime:
+    """Next time the elongation reaches target_deg (0 new, 180 full)."""
+    def offset(t: datetime) -> float:
+        return (moon_elongation(t) - target_deg + 180) % 360 - 180
+    step = timedelta(hours=6)
+    a = dt
+    for _ in range(31 * 4):
+        b = a + step
+        if offset(a) < 0 <= offset(b):
+            for _ in range(20):
+                mid = a + (b - a) / 2
+                if offset(mid) < 0:
+                    a = mid
+                else:
+                    b = mid
+            return b
+        a = b
+    return a
+
+
+def format_moon(now: Optional[datetime] = None) -> str:
+    now = now or datetime.now(TIMEZONE)
+    idx, lit = moon_phase(now)
+    emoji, name = MOON_PHASES[idx]
+    full = next_moon_phase(now, 180).astimezone(TIMEZONE)
+    new = next_moon_phase(now, 0).astimezone(TIMEZONE)
+    if USE_EMOJI:
+        return f"{emoji} {name}, {lit}% lit | 🌕 Full {full:%a %d %b} | 🌑 New {new:%a %d %b}"
+    return f"Moon: {name}, {lit}% lit. Full {full:%a %d %b}, new {new:%a %d %b}"
+
+
+# =====================================================================
 # Text helpers
 # =====================================================================
 def trim(text: str, limit: Optional[int] = None) -> str:
@@ -828,8 +1174,10 @@ def split_sender(text: str) -> tuple[str, str]:
 # Commands that work with or without a leading "!", but only as the whole message
 PLAIN_COMMANDS = {"ping", "test"}
 # Commands that only work with a leading "!" (returned as "!name")
-BANG_COMMANDS = {"help", "roll", "flipacoin", "eightball", "wx", "wxh", "wxf"}
-COMMAND_ALIASES = {"8ball": "eightball", "flip": "flipacoin", "coin": "flipacoin", "dice": "roll"}
+BANG_COMMANDS = {"help", "roll", "flipacoin", "eightball", "wx", "wxh", "wxf",
+                 "warn", "sun", "moon", "stats", "uptime"}
+COMMAND_ALIASES = {"8ball": "eightball", "flip": "flipacoin", "coin": "flipacoin", "dice": "roll",
+                   "warnings": "warn", "sunrise": "sun", "sunset": "sun"}
 
 
 def parse_command(body: str) -> tuple[str, str]:
@@ -857,10 +1205,99 @@ async def expand_tokens(text: str) -> str:
     now = datetime.now(TIMEZONE)
     text = text.replace("{time}", now.strftime("%H:%M")).replace("{date}", now.strftime("%a %d %b"))
     modes = {"wx": "now", "wxh": "hours", "wxf": "daily"}
-    for m in list(re.finditer(r"\{(wx[hf]?)(?::([^}]*))?\}", text)):
-        replacement = await get_weather(m.group(2) or "", mode=modes[m.group(1)]) or ""
-        text = text.replace(m.group(0), replacement, 1)
+    for m in list(re.finditer(r"\{(wx[hf]?|warn|sun)(?::([^}]*))?\}", text)):
+        place = m.group(2) or ""
+        if m.group(1) == "warn":
+            replacement = await get_warnings(place)
+        elif m.group(1) == "sun":
+            replacement = await get_sun(place)
+        else:
+            replacement = await get_weather(place, mode=modes[m.group(1)])
+        text = text.replace(m.group(0), replacement or "", 1)
+    if "{moon}" in text:
+        text = text.replace("{moon}", format_moon())
     return text
+
+
+# =====================================================================
+# Stats and uptime
+# =====================================================================
+class Stats:
+    """Counters since the bot started. Kept in memory, so a restart clears them."""
+
+    def __init__(self):
+        self.started = time.monotonic()
+        self.started_at = datetime.now(timezone.utc)
+        self.heard = 0              # messages heard on listened channels and in DMs
+        self.commands: Counter = Counter()
+        self.limited = 0            # commands dropped by a rate limit
+        self.sent = 0
+        self.send_failed = 0
+
+
+_stats = Stats()
+_radio: Optional[MeshCore] = None   # set in main() so !stats can ask for the battery level
+
+
+def _duration(seconds: float) -> str:
+    mins = int(seconds // 60)
+    days, mins = divmod(mins, 1440)
+    hours, mins = divmod(mins, 60)
+    if days:
+        return f"{days}d {hours}h {mins}m"
+    if hours:
+        return f"{hours}h {mins}m"
+    return f"{mins}m" if mins else f"{int(seconds)}s"
+
+
+def _host_uptime() -> Optional[float]:
+    try:
+        with open("/proc/uptime", encoding="ascii") as fh:
+            return float(fh.read().split()[0])
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def format_uptime() -> str:
+    since = _stats.started_at.astimezone(TIMEZONE)
+    text = f"Bot up {_duration(time.monotonic() - _stats.started)} (since {since:%a %d %b %H:%M})"
+    host = _host_uptime()
+    if host is not None:
+        text += f" | System up {_duration(host)}"
+    return ("⏱️ " if USE_EMOJI else "") + text
+
+
+def format_stats(battery_mv: Optional[int] = None, budget: Optional[int] = None) -> str:
+    budget = MAX_REPLY_BYTES if budget is None else budget
+    total = sum(_stats.commands.values())
+    tail = [f"Heard {_stats.heard}", f"Sent {_stats.sent}"]
+    if _stats.send_failed:
+        tail.append(f"Failed {_stats.send_failed}")
+    tail.append(f"Limited {_stats.limited}")
+    tail.append(f"WX API {_wx_budget.used_today()}/{WX_DAILY_CALL_BUDGET}")
+    if battery_mv:
+        tail.append(("🔋" if USE_EMOJI else "Batt ") + f"{battery_mv / 1000:.2f}V")
+    head = ("📊 " if USE_EMOJI else "") + f"Cmds {total}"
+    # Show the busiest commands, as many as fit
+    for n in (3, 2, 1, 0):
+        top = ", ".join(f"{c.lstrip('!')} {k}" for c, k in _stats.commands.most_common(n))
+        text = " | ".join([head + (f" ({top})" if top else "")] + tail)
+        if len(text.encode("utf-8")) <= budget:
+            return text
+    return text
+
+
+async def _battery_mv() -> Optional[int]:
+    if _radio is None:
+        return None
+    try:
+        result = await asyncio.wait_for(_radio.commands.get_bat(), timeout=5)
+        if result.type == EventType.ERROR:
+            return None
+        return int((result.payload or {}).get("level") or 0) or None
+    except Exception as ex:
+        _LOGGER.debug("Battery read failed: %s", ex)
+        return None
 
 
 # =====================================================================
@@ -898,10 +1335,13 @@ class Sender:
                 else:
                     result = await self.mc.commands.send_msg(target, text)
                 if result.type == EventType.ERROR:
+                    _stats.send_failed += 1
                     _LOGGER.error("Send to %s %s failed: %s", kind, target, result.payload)
                 else:
+                    _stats.sent += 1
                     _LOGGER.info("TX %s %s: %s", kind, target, text)
             except Exception as ex:
+                _stats.send_failed += 1
                 _LOGGER.error("Send exception: %s", ex)
             self._last_tx = time.monotonic()
             self.queue.task_done()
@@ -997,8 +1437,8 @@ async def scheduler(sender: Sender, entries: list[dict]) -> None:
 # =====================================================================
 # Command handling
 # =====================================================================
-HELP_TEXT = ("Cmds: ping, test, !wx/!wxh/!wxf [place] (now/hours/3 days), "
-             "!roll [2d6], !flipacoin, !eightball <question>, !help")
+HELP_TEXT = ("Cmds: ping, test, !wx/!wxh/!wxf [place], !warn [place], !sun [place], !moon, "
+             "!roll [2d6], !flip, !8ball <q>, !stats, !uptime, !help")
 WX_MODES = {"!wx": "now", "!wxh": "hours", "!wxf": "daily"}
 
 # ---------- Fun commands ----------
@@ -1055,8 +1495,20 @@ async def run_command(cmd: str, arg: str, sender_name: str, rx_info: dict[str, A
         return mention + flip_coin()
     if cmd == "!eightball":
         return mention + eightball(arg)
+    budget = MAX_REPLY_BYTES - len(mention.encode("utf-8"))
+    if cmd == "!warn":
+        text = await get_warnings(arg, budget=budget, quiet=True)
+        return mention + text if text else None
+    if cmd == "!sun":
+        text = await get_sun(arg, quiet=True)
+        return mention + text if text else None
+    if cmd == "!moon":
+        return mention + format_moon()
+    if cmd == "!stats":
+        return mention + format_stats(await _battery_mv(), budget=budget)
+    if cmd == "!uptime":
+        return mention + format_uptime()
     if cmd in WX_MODES:
-        budget = MAX_REPLY_BYTES - len(mention.encode("utf-8"))
         text = await get_weather(arg, mode=WX_MODES[cmd], budget=budget, quiet=True)
         return mention + text if text else None
     return None
@@ -1066,6 +1518,7 @@ async def run_command(cmd: str, arg: str, sender_name: str, rx_info: dict[str, A
 # Main
 # =====================================================================
 async def main(port: str) -> None:
+    global _radio
     if not MET_OFFICE_API_KEY:
         _LOGGER.warning("Met Office API key not found (env METOFFICE_API_KEY, metoffice_api_key "
                         "in config.toml, ~/.config/meshcore/metoffice_key or metoffice_key.txt). "
@@ -1078,6 +1531,7 @@ async def main(port: str) -> None:
     if meshcore is None:
         raise SystemExit(f"Could not connect on {port}")
     _LOGGER.info("Connected on %s", port)
+    _radio = meshcore
 
     self_name = (meshcore.self_info or {}).get("name", "")
     limiter = RateLimiter()
@@ -1109,11 +1563,13 @@ async def main(port: str) -> None:
         if not admin:
             ok, bucket, retry = limiter.check(user_key, chan_key)
             if not ok:
+                _stats.limited += 1
                 _LOGGER.info("Rate limited (%s) %s on %s, retry %ss", bucket, user_key, chan_key, retry)
                 if RATE_LIMIT_NOTIFY and bucket == "user" and limiter.should_notify(user_key):
                     who = f"@[{sender_name}] " if sender_name else ""
                     reply(f"{who}Slow down, try again in {retry}s")
                 return
+        _stats.commands[cmd] += 1
         # Run in the background so a slow weather lookup doesn't hold up other messages
         task = asyncio.create_task(respond(cmd, arg, sender_name, rx_info, reply), name=f"cmd {cmd}")
         running.add(task)
@@ -1127,6 +1583,7 @@ async def main(port: str) -> None:
         sender_name, body = split_sender(msg.get("text", ""))
         if self_name and sender_name == self_name:
             return
+        _stats.heard += 1
         cmd, arg = parse_command(body)
         _LOGGER.log(logging.INFO if cmd else logging.DEBUG, "RX ch%s %s: %s", chan, sender_name, body)
         dispatch(cmd, arg, sender_name,
@@ -1141,6 +1598,7 @@ async def main(port: str) -> None:
         if not prefix:
             return
         text = msg.get("text", "")
+        _stats.heard += 1
         cmd, arg = parse_command(text)
         _LOGGER.log(logging.INFO if cmd else logging.DEBUG, "RX dm %s: %s", prefix, text)
         dispatch(cmd, arg, "",
@@ -1190,6 +1648,10 @@ if __name__ == "__main__":
     ap.add_argument("--wx", metavar="LOCATION", help="print a !wx reply and exit (no radio)")
     ap.add_argument("--wxh", metavar="LOCATION", help="print a !wxh reply and exit (no radio)")
     ap.add_argument("--wxf", metavar="LOCATION", help="print a !wxf reply and exit (no radio)")
+    ap.add_argument("--warn", metavar="LOCATION", nargs="?", const="",
+                    help="print a !warn reply and exit (no radio)")
+    ap.add_argument("--sun", metavar="LOCATION", nargs="?", const="", help="print a !sun reply and exit (no radio)")
+    ap.add_argument("--moon", action="store_true", help="print a !moon reply and exit (no radio)")
     args = ap.parse_args()
 
     loaded = load_config(args.config)
@@ -1203,6 +1665,12 @@ if __name__ == "__main__":
             print(trim(asyncio.run(get_weather(args.wxh, mode="hours")) or ""))
         elif args.wxf is not None:
             print(trim(asyncio.run(get_weather(args.wxf, mode="daily")) or ""))
+        elif args.warn is not None:
+            print(trim(asyncio.run(get_warnings(args.warn)) or ""))
+        elif args.sun is not None:
+            print(trim(asyncio.run(get_sun(args.sun)) or ""))
+        elif args.moon:
+            print(trim(format_moon()))
         else:
             asyncio.run(main(args.port or SERIAL_PORT))
     except KeyboardInterrupt:
