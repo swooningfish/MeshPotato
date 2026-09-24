@@ -228,8 +228,12 @@ def test_ping_shows_only_hops(monkeypatch):
     assert asyncio.run(bot.run_command("ping", "", "Alice", info)) == "@[Alice] Pong (2 hops)"
 
 
-def test_test_shows_rx_report():
+def test_test_shows_rx_report(monkeypatch):
     info = {"path_len": 2, "path_nodes": ["a1", "b2"], "snr": 7.5, "rssi": -85}
+    monkeypatch.setattr(bot, "DEFAULT_LOCATION", "Norwich")
+    assert asyncio.run(bot.run_command("test", "", "", info)) == \
+        "Test OK (2 hops) SNR 7.5dB RSSI -85dBm RX from Norwich"
+    monkeypatch.setattr(bot, "DEFAULT_LOCATION", "")
     assert asyncio.run(bot.run_command("test", "", "", info)) == "Test OK (2 hops) SNR 7.5dB RSSI -85dBm"
 
 

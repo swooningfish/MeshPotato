@@ -6,7 +6,7 @@ Built on the patterns in meshcore_py/examples/serial_pingbot.py and meshcore_py/
 
 Commands (channel or direct message):
   ping               -> Pong with hop count         (whole message, a leading ! is optional)
-  test               -> Test OK with hop count, SNR and RSSI (same rules as ping)
+  test               -> Test OK with hop count, SNR, RSSI and the bot's DEFAULT_LOCATION (same rules as ping)
   !path / !trace     -> The repeaters your message came through, with names where known
   !wx [location]     -> Current conditions from Met Office DataHub (hourly)
   !wxh [location]    -> Next few hours, hour by hour (hourly)
@@ -1715,7 +1715,8 @@ async def run_command(cmd: str, arg: str, sender_name: str, rx_info: dict[str, A
     if cmd == "ping":
         return f"{mention}{'🏓 ' if USE_EMOJI else ''}Pong {format_hops(rx_info)}"
     if cmd == "test":
-        return f"{mention}Test OK {format_rx_report(rx_info)}"
+        where = f" RX from {DEFAULT_LOCATION}" if DEFAULT_LOCATION.strip() else ""
+        return f"{mention}Test OK {format_rx_report(rx_info)}{where}"
     if cmd == "!path":
         return mention + format_path(rx_info, repeater_names(),
                                      budget=MAX_REPLY_BYTES - len(mention.encode("utf-8")))

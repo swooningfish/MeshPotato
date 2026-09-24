@@ -38,7 +38,7 @@ Send these in a listening channel or as a direct message.
 | Command | Reply |
 |---------|-------|
 | `ping` | `@[You] 🏓 Pong (2 hops)` |
-| `test` | `@[You] Test OK (2 hops) SNR 7.5dB RSSI -85dBm` with hop count and signal report |
+| `test` | `@[You] Test OK (2 hops) SNR 7.5dB RSSI -85dBm RX from Norwich` with hop count, signal report and where the bot heard it (`DEFAULT_LOCATION`) |
 
 The hop count comes from the message itself. The path addresses aren't shown here (use `!path`), because a long path makes the reply too long for one message. SNR and RSSI come from the message when the radio reports them. Otherwise they come from the radio's receive log for the same packet. A message that came by a direct route shows `(direct route)`. Values the radio doesn't report are left out.
 
