@@ -162,6 +162,64 @@ def test_format_rx_report():
     assert bot.format_rx_report({}) == "(? hops)"
 
 
+CONTACTS = {
+    "a1ff": {"public_key": "A1FF00", "adv_name": "Norwich Cathedral RPT", "type": 2},
+    "b2aa": {"public_key": "b2aa00", "adv_name": "Hill Top", "type": 2},
+    "b2bb": {"public_key": "b2bb00", "adv_name": "Other Hill", "type": 2},     # b2 is ambiguous
+    "c3cc": {"public_key": "c3cc00", "adv_name": "Bob's phone", "type": 1},    # companion, not a repeater
+}
+
+
+def test_repeater_names():
+    names = bot.repeater_names(CONTACTS)
+    assert names == {"a1ff00": "Norwich Cathedral RPT", "b2aa00": "Hill Top", "b2bb00": "Other Hill"}
+
+
+def test_format_path_names_unique_matches_only():
+    info = {"path_len": 3, "path_nodes": ["a1", "b2", "c3"]}
+    out = bot.format_path(info, bot.repeater_names(CONTACTS))
+    assert out == "🛤️ 3 hops: a1 Norwich Cath › b2 › c3"
+    assert bot.format_path({"path_len": 2, "path_nodes": ["b2aa", "c3cc"]},
+                           bot.repeater_names(CONTACTS)) == "🛤️ 2 hops: b2aa Hill Top › c3cc"
+
+
+def test_format_path_fits_budget():
+    nodes = [f"{i:02x}" for i in range(20)]
+    info = {"path_len": 20, "path_nodes": nodes}
+    names = {f"{i:02x}0000": f"Repeater{i}" for i in range(20)}
+    out = bot.format_path(info, names, budget=60)
+    assert len(out.encode("utf-8")) <= 60
+    assert out.startswith("🛤️ 20 hops: 00 › 01 › ") and out.endswith(" more")
+    short = bot.format_path({"path_len": 2, "path_nodes": ["a1", "b2"]}, names={"a1ff": "X" * 12}, budget=30)
+    assert short == "🛤️ 2 hops: a1 › b2"                # names dropped before hops are
+
+
+@pytest.mark.parametrize("info, expected", [
+    ({"direct": True}, "🛤️ Direct route, the path isn't carried in the message"),
+    ({"path_len": 0}, "🛤️ 0 hops, heard directly"),
+    ({"path_len": 2}, "🛤️ 2 hops, path not reported"),
+    ({}, "🛤️ Path unknown"),
+])
+def test_format_path_without_nodes(info, expected):
+    assert bot.format_path(info) == expected
+
+
+def test_path_command_and_trace_alias(monkeypatch):
+    monkeypatch.setattr(bot, "_radio", type("Radio", (), {"contacts": CONTACTS})())
+    assert bot.parse_command("!trace") == ("!path", "")
+    assert bot.parse_command("path") == ("", "")
+    info = {"path_len": 1, "path_nodes": ["a1"]}
+    assert asyncio.run(bot.run_command("!path", "", "Alice", info)) == "@[Alice] 🛤️ 1 hop: a1 Norwich Cath"
+    monkeypatch.setattr(bot, "USE_EMOJI", False)
+    monkeypatch.setattr(bot, "_radio", None)
+    assert bot.format_path({"path_len": 2, "path_nodes": ["a1", "b2"]}, bot.repeater_names()) == "Path 2 hops: a1 > b2"
+
+
+def test_help_fits_one_message():
+    assert "!path" in bot.HELP_TEXT
+    assert len(bot.HELP_TEXT.encode("utf-8")) <= bot.MAX_REPLY_BYTES
+
+
 # ---------- commands ----------
 def test_ping_shows_only_hops():
     info = {"path_len": 2, "path_nodes": ["a1", "b2"], "snr": 7.5, "rssi": -85}

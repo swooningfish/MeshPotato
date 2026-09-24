@@ -7,6 +7,7 @@ Built on the patterns in meshcore_py/examples/serial_pingbot.py and meshcore_py/
 Commands (channel or direct message):
   ping               -> Pong with hop count         (whole message, a leading ! is optional)
   test               -> Test OK with hop count, SNR and RSSI (same rules as ping)
+  !path / !trace     -> The repeaters your message came through, with names where known
   !wx [location]     -> Current conditions from Met Office DataHub (hourly)
   !wxh [location]    -> Next few hours, hour by hour (hourly)
   !wxf [location]    -> 3-day forecast from Met Office DataHub (daily)
@@ -402,6 +403,60 @@ def format_rx_report(info: dict[str, Any]) -> str:
     if info.get("rssi") is not None:
         parts.append(f"RSSI {info['rssi']}dBm")
     return " ".join(parts)
+
+
+PATH_NAME_CHARS = 12            # repeater names in !path are cut to this many characters
+CHAT_NODE_TYPE = 1              # MeshCore contact type for a companion. Companions don't repeat
+
+
+def repeater_names(contacts: Optional[dict] = None) -> dict[str, str]:
+    """Public key (lower-case hex) -> name for the radio's contacts that can repeat."""
+    if contacts is None:
+        contacts = getattr(_radio, "contacts", None) or {}
+    names = {}
+    for c in contacts.values():
+        key, name = (c.get("public_key") or "").lower(), (c.get("adv_name") or "").strip()
+        if key and name and c.get("type") != CHAT_NODE_TYPE:
+            names[key] = name
+    return names
+
+
+def _node_label(node: str, names: dict[str, str]) -> str:
+    """'a1 Norwich' when exactly one known repeater's key starts with the hash, else 'a1'."""
+    matches = [n for key, n in names.items() if key.startswith(node.lower())]
+    if len(matches) != 1:
+        return node
+    return f"{node} {matches[0][:PATH_NAME_CHARS].strip()}"
+
+
+def format_path(info: dict[str, Any], names: Optional[dict[str, str]] = None,
+                budget: Optional[int] = None) -> str:
+    """!path: '🛤️ 3 hops: a1 Norwich › b2 › c3', first repeater first.
+    Leaves the names out if they don't fit, then the last repeaters ('+2 more')."""
+    budget = MAX_REPLY_BYTES if budget is None else budget
+    icon, sep = ("🛤️ ", " › ") if USE_EMOJI else ("Path ", " > ")
+    if info.get("direct"):
+        return f"{icon}Direct route, the path isn't carried in the message"
+    n = info.get("path_len")
+    if n is None:
+        return f"{icon}Path unknown"
+    if n == 0:
+        return f"{icon}0 hops, heard directly"
+    nodes = info.get("path_nodes") or []
+    if not nodes:
+        return f"{icon}{_hops(n)}, path not reported"
+    head = f"{icon}{_hops(n)}: "
+    for labels in ([_node_label(x, names or {}) for x in nodes], nodes):
+        text = head + sep.join(labels)
+        if len(text.encode("utf-8")) <= budget:
+            return text
+    shown = []
+    for i, node in enumerate(nodes):
+        more = f" +{len(nodes) - i - 1} more" if i < len(nodes) - 1 else ""
+        if len((head + sep.join(shown + [node]) + more).encode("utf-8")) > budget:
+            break
+        shown.append(node)
+    return head + sep.join(shown) + f" +{len(nodes) - len(shown)} more"
 
 
 # =====================================================================
@@ -1268,9 +1323,9 @@ def split_sender(text: str) -> tuple[str, str]:
 PLAIN_COMMANDS = {"ping", "test"}
 # Commands that only work with a leading "!" (returned as "!name")
 BANG_COMMANDS = {"help", "roll", "flipacoin", "eightball", "wx", "wxh", "wxf",
-                 "warn", "sun", "moon", "stats", "uptime", "mute", "unmute", "say"}
+                 "warn", "sun", "moon", "path", "stats", "uptime", "mute", "unmute", "say"}
 COMMAND_ALIASES = {"8ball": "eightball", "flip": "flipacoin", "coin": "flipacoin", "dice": "roll",
-                   "warnings": "warn", "sunrise": "sun", "sunset": "sun"}
+                   "warnings": "warn", "sunrise": "sun", "sunset": "sun", "trace": "path"}
 
 
 def parse_command(body: str) -> tuple[str, str]:
@@ -1547,7 +1602,7 @@ async def scheduler(sender: Sender, entries: list[dict]) -> None:
 # =====================================================================
 # Command handling
 # =====================================================================
-HELP_TEXT = ("Cmds: ping, test, !wx/!wxh/!wxf [place], !warn [place], !sun [place], !moon, "
+HELP_TEXT = ("Cmds: ping, test, !wx/!wxh/!wxf [place], !warn [place], !sun [place], !moon, !path, "
              "!roll [2d6], !flip, !8ball <q>, !help")
 # Only answered in a DM from a key in ADMIN_PUBKEYS. Channel messages carry no key,
 # so these are never answered in a channel.
@@ -1661,6 +1716,9 @@ async def run_command(cmd: str, arg: str, sender_name: str, rx_info: dict[str, A
         return f"{mention}Pong {format_hops(rx_info)}"
     if cmd == "test":
         return f"{mention}Test OK {format_rx_report(rx_info)}"
+    if cmd == "!path":
+        return mention + format_path(rx_info, repeater_names(),
+                                     budget=MAX_REPLY_BYTES - len(mention.encode("utf-8")))
     if cmd == "!help":
         return HELP_TEXT
     if cmd == "!roll":
@@ -1724,6 +1782,16 @@ async def main(port: str) -> None:
     running: set[asyncio.Task] = set()      # keeps command tasks alive until they finish
 
     await meshcore.start_auto_message_fetching()
+
+    async def refresh_contacts():
+        """Contacts give !path its repeater names. Only re-read when the radio says they changed."""
+        try:
+            await asyncio.wait_for(meshcore.ensure_contacts(follow=True), timeout=30)
+        except Exception as ex:
+            _LOGGER.warning("Contact list read failed, !path will show hashes only: %s", ex)
+
+    await refresh_contacts()
+    _LOGGER.info("%d repeaters known for !path names", len(repeater_names()))
 
     async def handle_rx_log_data(event):
         parsed = parse_rx_log_data(event.payload or {})
@@ -1813,6 +1881,7 @@ async def main(port: str) -> None:
             _wx_cache.cleanup()
             _geo_cache.cleanup()
             _warn_cache.cleanup()
+            await refresh_contacts()
 
     tasks = [
         asyncio.create_task(sender.run(), name="sender"),

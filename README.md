@@ -40,7 +40,23 @@ Send these in a listening channel or as a direct message.
 | `ping` | `@[You] Pong (2 hops)` |
 | `test` | `@[You] Test OK (2 hops) SNR 7.5dB RSSI -85dBm` with hop count and signal report |
 
-The hop count comes from the message itself. The path addresses aren't shown, because a long path makes the reply too long for one message. SNR and RSSI come from the message when the radio reports them. Otherwise they come from the radio's receive log for the same packet. A message that came by a direct route shows `(direct route)`. Values the radio doesn't report are left out.
+The hop count comes from the message itself. The path addresses aren't shown here (use `!path`), because a long path makes the reply too long for one message. SNR and RSSI come from the message when the radio reports them. Otherwise they come from the radio's receive log for the same packet. A message that came by a direct route shows `(direct route)`. Values the radio doesn't report are left out.
+
+#### Path (`!` required)
+
+| Command | Reply |
+|---------|-------|
+| `!path` | `@[You] 🛤️ 3 hops: a1 Norwich Cath › b2 › c3` |
+
+Short alias: `!trace` = `!path`.
+
+`!path` lists the repeaters your message came through, first repeater first. Each repeater shows as the short hash of its public key that MeshCore puts in the path.
+
+- **Names:** when exactly one repeater in the bot radio's contact list has a key starting with that hash, its name is added (first 12 characters, `PATH_NAME_CHARS`). A hash that matches no repeater, or several, stays as hex, because the bot can't be sure which one it was. Companion contacts are skipped because they don't repeat. The bot reads the contact list at startup and re-reads it every 5 minutes if the radio says it changed.
+- **Long paths:** if the path doesn't fit in one message, the names are dropped first. If it still doesn't fit, the last repeaters become `+2 more`.
+- **Other replies:** `0 hops, heard directly` means no repeater was involved. A message sent by direct route doesn't carry its path, so the reply says so.
+
+`!path` shows the route the message already took. It doesn't send a MeshCore trace packet.
 
 #### Weather (`!` required)
 
@@ -102,7 +118,7 @@ Short aliases: `!dice` = `!roll`, `!flip` and `!coin` = `!flipacoin`, `!8ball` =
 
 Dice, coin and eight ball use Python's `SystemRandom`, which draws on the operating system's random source.
 
-The fun, warning, sun, moon and status commands count toward the same rate limits as the weather commands.
+The path, fun, warning, sun, moon and status commands count toward the same rate limits as the weather commands.
 
 `<location>` accepts:
 
