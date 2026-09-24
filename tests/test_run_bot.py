@@ -381,6 +381,110 @@ def test_warn_unknown_place_is_silent(monkeypatch):
     assert asyncio.run(bot.run_command("!warn", "nowhere", "Alice", {})) is None
 
 
+# ---------- warning alerts ----------
+def _warning(level, hazard, start, end):
+    return {"level": level, "hazard": hazard, "area": "", "start": start, "end": end}
+
+
+class _FakeSender:
+    def __init__(self):
+        self.sent = []
+
+    def channel(self, ch, text):
+        self.sent.append((ch, text))
+
+    def dm(self, key, text):
+        self.sent.append((key, text))
+
+
+@pytest.fixture
+def warn_feed(monkeypatch):
+    """A feed the test can change, and a watcher that reads it."""
+    monkeypatch.setattr(bot, "TIMEZONE", LONDON)
+    monkeypatch.setattr(bot, "_muted_until", 0.0)
+    monkeypatch.setattr(bot, "_warn_watch", bot.WarnWatcher())
+    feed = {"ee": []}
+    monkeypatch.setattr(bot, "_fetch_warnings_sync", lambda code: feed[code])
+    return feed
+
+
+NOW = datetime(2026, 9, 24, 14, tzinfo=LONDON)
+RAIN = _warning("yellow", "rain", NOW + timedelta(hours=16), NOW + timedelta(hours=31))
+WIND = _warning("amber", "wind", NOW + timedelta(hours=4), NOW + timedelta(hours=22))
+
+
+def test_warn_starts_watch_on_its_channel(warn_feed, monkeypatch):
+    monkeypatch.setattr(bot, "_warn_region_sync", lambda q: "ee")
+    warn_feed["ee"] = [RAIN]
+    reply = asyncio.run(bot.run_command("!warn", "", "Alice", {}, ("chan", 1)))
+    assert reply.startswith("@[Alice] ⚠️ East of England:")
+    assert list(bot._warn_watch.watches) == [("chan", 1, "ee")]
+    # No target (the CLI or a schedule): no watch
+    monkeypatch.setattr(bot, "_warn_watch", bot.WarnWatcher())
+    asyncio.run(bot.run_command("!warn", "", "Alice", {}))
+    assert not bot._warn_watch.watches
+
+
+def test_watch_posts_only_on_change(warn_feed):
+    watcher, out = bot._warn_watch, _FakeSender()
+    warn_feed["ee"] = [RAIN]
+    watcher.add("chan", 1, "ee", [RAIN], now=NOW)
+    asyncio.run(watcher.check(out, now=NOW))
+    assert out.sent == []                                   # nothing new since the !warn
+    warn_feed["ee"] = [RAIN, WIND]
+    asyncio.run(watcher.check(out, now=NOW))
+    assert out.sent == [(1, "🔔 ⚠️ East of England: 🟠💨 Wind Thu 18:00-Fri 12:00 | 🟡🌧️ Rain Fri 06:00-21:00")]
+    asyncio.run(watcher.check(out, now=NOW))
+    assert len(out.sent) == 1                               # same again: no post
+    warn_feed["ee"] = []                                    # cancelled early
+    asyncio.run(watcher.check(out, now=NOW))
+    assert out.sent[-1] == (1, "🔔 ✅ No weather warnings for East of England")
+
+
+def test_watch_level_change_is_posted(warn_feed):
+    watcher, out = bot._warn_watch, _FakeSender()
+    watcher.add("dm", "a1b2c3d4e5f6", "ee", [WIND], now=NOW)
+    warn_feed["ee"] = [{**WIND, "level": "red"}]
+    asyncio.run(watcher.check(out, now=NOW))
+    assert out.sent[0][0] == "a1b2c3d4e5f6" and "🔴💨 Wind" in out.sent[0][1]
+
+
+def test_watch_ignores_warning_running_out(warn_feed):
+    watcher, out = bot._warn_watch, _FakeSender()
+    watcher.add("chan", 1, "ee", [WIND, RAIN], now=NOW)
+    warn_feed["ee"] = [WIND, RAIN]
+    later = NOW + timedelta(hours=23)                       # wind has ended, rain still on
+    asyncio.run(watcher.check(out, now=later))
+    warn_feed["ee"] = [RAIN]                                # feed drops the ended warning
+    asyncio.run(watcher.check(out, now=later))
+    assert out.sent == []
+
+
+def test_watch_waits_for_mute_then_expires(warn_feed, monkeypatch):
+    watcher, out = bot._warn_watch, _FakeSender()
+    watcher.add("chan", 1, "ee", [], now=NOW)
+    warn_feed["ee"] = [RAIN]
+    monkeypatch.setattr(bot, "_muted_until", time.monotonic() + 600)
+    asyncio.run(watcher.check(out, now=NOW))
+    assert out.sent == []
+    monkeypatch.setattr(bot, "_muted_until", 0.0)
+    asyncio.run(watcher.check(out, now=NOW))                # the change is posted after the mute
+    assert len(out.sent) == 1
+    watcher.watches[("chan", 1, "ee")]["until"] = time.monotonic() - 1
+    asyncio.run(watcher.check(out, now=NOW))
+    assert not watcher.watches
+
+
+def test_watch_limit(warn_feed, monkeypatch):
+    monkeypatch.setattr(bot, "WARN_WATCH_MAX", 1)
+    watcher = bot._warn_watch
+    watcher.add("chan", 1, "ee", [], now=NOW)
+    watcher.add("chan", 3, "ee", [], now=NOW)
+    assert list(watcher.watches) == [("chan", 1, "ee")]
+    watcher.add("chan", 1, "ee", [RAIN], now=NOW)           # renewing an existing watch still works
+    assert len(watcher.watches[("chan", 1, "ee")]["seen"]) == 1
+
+
 # ---------- sun and moon ----------
 def test_sun_times_london_midsummer(monkeypatch):
     monkeypatch.setattr(bot, "TIMEZONE", LONDON)

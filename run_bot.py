@@ -10,7 +10,7 @@ Commands (channel or direct message):
   !wx [location]     -> Current conditions from Met Office DataHub (hourly)
   !wxh [location]    -> Next few hours, hour by hour (hourly)
   !wxf [location]    -> 3-day forecast from Met Office DataHub (daily)
-  !warn [location]   -> Met Office weather warnings for the region
+  !warn [location]   -> Met Office weather warnings for the region, then posts changes for a while
   !sun [location]    -> Sunrise, sunset and hours of daylight today
   !moon              -> Moon phase, % lit and the next full and new moon
   !stats             -> Commands served, messages heard, Met Office calls used (admin DMs only)
@@ -35,6 +35,7 @@ Features:
   - Outgoing transmit queue with a minimum gap between radio sends
   - Scheduled messages: daily times, weekday filters, one-shot timestamps, intervals
   - Weather and geocode caching plus a daily call budget for the Met Office free tier
+  - Weather warning alerts: after a !warn, changes to that region's warnings are posted
   - Settings can be overridden from config.toml (Python 3.11+)
 
 Setup:
@@ -106,6 +107,9 @@ WXH_HOURS = 6                   # wxh: max hours to show (cut to fit MAX_REPLY_B
 WXH_STEP_HOURS = 1              # wxh: 1 = every hour, 2 = every 2 hours, 3 = every 3 hours
 WXH_MENTION_RESERVE = 25        # wxh: bytes kept free for text around {wxh} in schedules
 WARN_CACHE_SEC = 600            # reuse the Met Office warnings feed for 10 min
+WARN_WATCH_HOURS = 24           # after a !warn, post changes to that region's warnings for this long
+WARN_WATCH_MAX = 10             # most regions and channels watched at once
+WARN_WATCH_TICK_SEC = 60        # how often watched regions are checked
 
 # ---------- Rate limits: (max_events, window_seconds) ----------
 RATE_LIMIT_GLOBAL = (20, 60)        # all commands across the bot
@@ -239,6 +243,9 @@ _CONFIG_SETTINGS: dict[str, Optional[Callable[[Any], Any]]] = {
     "WXH_STEP_HOURS": None,
     "WXH_MENTION_RESERVE": None,
     "WARN_CACHE_SEC": None,
+    "WARN_WATCH_HOURS": None,
+    "WARN_WATCH_MAX": None,
+    "WARN_WATCH_TICK_SEC": None,
     "RATE_LIMIT_GLOBAL": _pair,
     "RATE_LIMIT_PER_USER": _pair,
     "RATE_LIMIT_PER_CHANNEL": _pair,
@@ -1006,21 +1013,100 @@ def format_warnings(warnings: list[dict], code: str, budget: Optional[int] = Non
     return text
 
 
-async def get_warnings(query: str, budget: Optional[int] = None, quiet: bool = False) -> Optional[str]:
+async def lookup_warnings(query: str, budget: Optional[int] = None,
+                          quiet: bool = False) -> tuple[Optional[str], Optional[list[dict]], Optional[str]]:
+    """Returns (region code, warnings, reply). Warnings is None when the lookup failed."""
     try:
         code = await asyncio.to_thread(_warn_region_sync, query)
     except LocationError as ex:
         _LOGGER.info("Warning region lookup failed for %r: %s", query, ex)
-        return None if quiet else f"WARN: {ex}"
+        return None, None, None if quiet else f"WARN: {ex}"
     except Exception as ex:
         _LOGGER.warning("Warning region lookup failed for %r: %s", query, ex)
-        return "WARN: place lookup failed"
+        return None, None, "WARN: place lookup failed"
     try:
         warnings = await asyncio.to_thread(_fetch_warnings_sync, code)
     except Exception as ex:
         _LOGGER.warning("Met Office warnings feed failed for %s: %s", code, ex)
-        return "WARN: lookup failed"
-    return format_warnings(warnings, code, budget=budget)
+        return code, None, "WARN: lookup failed"
+    return code, warnings, format_warnings(warnings, code, budget=budget)
+
+
+async def get_warnings(query: str, budget: Optional[int] = None, quiet: bool = False) -> Optional[str]:
+    return (await lookup_warnings(query, budget=budget, quiet=quiet))[2]
+
+
+# ---------- Warning alerts ----------
+def _warn_key(w: dict) -> tuple:
+    return w["level"], w["hazard"].lower(), w["area"], w["start"], w["end"]
+
+
+def _live_warn_keys(warnings: list[dict], now: datetime) -> set[tuple]:
+    return {_warn_key(w) for w in warnings if not w["end"] or w["end"] > now}
+
+
+class WarnWatcher:
+    """After a !warn, keeps checking that region and posts to the same channel or DM when its
+    warnings change: a new warning, a new level or new times, or one cancelled early. A warning
+    that simply runs out isn't posted. Each !warn restarts the WARN_WATCH_HOURS clock.
+    Kept in memory, so a restart ends every watch."""
+
+    def __init__(self):
+        # (kind, target, region code) -> {"until": monotonic end, "seen": warning keys last posted}
+        self.watches: dict[tuple, dict] = {}
+
+    def add(self, kind: str, target: Any, code: str, warnings: list[dict],
+            now: Optional[datetime] = None) -> None:
+        now = now or datetime.now(TIMEZONE)
+        key = (kind, target, code)
+        if key not in self.watches and len(self.watches) >= WARN_WATCH_MAX:
+            _LOGGER.info("Warning watch for %s on %s %s not started, %d already running",
+                         code, kind, target, WARN_WATCH_MAX)
+            return
+        self.watches[key] = {"until": time.monotonic() + WARN_WATCH_HOURS * 3600,
+                             "seen": _live_warn_keys(warnings, now)}
+        _LOGGER.info("Watching warnings for %s on %s %s for %sh", code, kind, target, WARN_WATCH_HOURS)
+
+    async def check(self, sender: "Sender", now: Optional[datetime] = None) -> None:
+        now = now or datetime.now(TIMEZONE)
+        for key, watch in list(self.watches.items()):
+            kind, target, code = key
+            if time.monotonic() >= watch["until"]:
+                del self.watches[key]
+                _LOGGER.info("Warning watch for %s on %s %s ended", code, kind, target)
+                continue
+            try:
+                warnings = await asyncio.to_thread(_fetch_warnings_sync, code)
+            except Exception as ex:
+                _LOGGER.warning("Met Office warnings feed failed for %s: %s", code, ex)
+                continue
+            current = _live_warn_keys(warnings, now)
+            still_live = {k for k in watch["seen"] if not k[4] or k[4] > now}
+            if current == still_live:
+                watch["seen"] = current         # forget warnings that ran out, without a post
+                continue
+            if mute_remaining() > 0:            # post the change once the mute ends
+                continue
+            watch["seen"] = current
+            prefix = "🔔 " if USE_EMOJI else "Update: "
+            text = prefix + format_warnings(warnings, code, now=now,
+                                            budget=MAX_REPLY_BYTES - len(prefix.encode("utf-8")))
+            _LOGGER.info("Warnings changed for %s, posting to %s %s", code, kind, target)
+            if kind == "chan":
+                sender.channel(target, text)
+            else:
+                sender.dm(target, text)
+
+    async def run(self, sender: "Sender") -> None:
+        while True:
+            await asyncio.sleep(WARN_WATCH_TICK_SEC)
+            try:
+                await self.check(sender)
+            except Exception:
+                _LOGGER.exception("Warning watch check failed")
+
+
+_warn_watch = WarnWatcher()
 
 
 # =====================================================================
@@ -1567,7 +1653,9 @@ def eightball(question: str) -> str:
     return icon + _rng.choice(EIGHTBALL_ANSWERS)
 
 
-async def run_command(cmd: str, arg: str, sender_name: str, rx_info: dict[str, Any]) -> Optional[str]:
+async def run_command(cmd: str, arg: str, sender_name: str, rx_info: dict[str, Any],
+                      target: Optional[tuple[str, Any]] = None) -> Optional[str]:
+    """target is where the reply goes, ("chan", idx) or ("dm", pubkey prefix). !warn watches it."""
     mention = f"@[{sender_name}] " if sender_name else ""
     if cmd == "ping":
         return f"{mention}Pong {format_hops(rx_info)}"
@@ -1583,7 +1671,9 @@ async def run_command(cmd: str, arg: str, sender_name: str, rx_info: dict[str, A
         return mention + eightball(arg)
     budget = MAX_REPLY_BYTES - len(mention.encode("utf-8"))
     if cmd == "!warn":
-        text = await get_warnings(arg, budget=budget, quiet=True)
+        code, warnings, text = await lookup_warnings(arg, budget=budget, quiet=True)
+        if target and warnings is not None:
+            _warn_watch.add(target[0], target[1], code, warnings)
         return mention + text if text else None
     if cmd == "!sun":
         text = await get_sun(arg, quiet=True)
@@ -1641,16 +1731,16 @@ async def main(port: str) -> None:
             latest_rx.clear()
             latest_rx.update(parsed, at=time.monotonic())
 
-    async def respond(cmd, arg, sender_name, rx_info, reply):
+    async def respond(cmd, arg, sender_name, rx_info, reply, target):
         try:
-            text = await run_command(cmd, arg, sender_name, rx_info)
+            text = await run_command(cmd, arg, sender_name, rx_info, target)
         except Exception:
             _LOGGER.exception("Command %s failed", cmd)
             return
         if text:
             reply(text)
 
-    def dispatch(cmd, arg, sender_name, user_key, chan_key, reply, rx_info, admin=False):
+    def dispatch(cmd, arg, sender_name, user_key, chan_key, reply, target, rx_info, admin=False):
         if not cmd:
             return
         if not command_allowed(cmd, admin):
@@ -1670,7 +1760,7 @@ async def main(port: str) -> None:
                 return
         _stats.commands[cmd] += 1
         # Run in the background so a slow weather lookup doesn't hold up other messages
-        task = asyncio.create_task(respond(cmd, arg, sender_name, rx_info, reply), name=f"cmd {cmd}")
+        task = asyncio.create_task(respond(cmd, arg, sender_name, rx_info, reply, target), name=f"cmd {cmd}")
         running.add(task)
         task.add_done_callback(running.discard)
 
@@ -1689,6 +1779,7 @@ async def main(port: str) -> None:
                  user_key=f"name:{sender_name.lower()}",
                  chan_key=f"ch:{chan}",
                  reply=lambda t: sender.channel(chan, t),
+                 target=("chan", chan),
                  rx_info=message_rx_info(msg))
 
     async def handle_contact_message(event):
@@ -1704,6 +1795,7 @@ async def main(port: str) -> None:
                  user_key=prefix,
                  chan_key="dm",
                  reply=lambda t: sender.dm(prefix, t),
+                 target=("dm", prefix),
                  rx_info=message_rx_info(msg),
                  admin=prefix.lower() in admin_prefixes)
 
@@ -1720,11 +1812,13 @@ async def main(port: str) -> None:
             limiter.cleanup()
             _wx_cache.cleanup()
             _geo_cache.cleanup()
+            _warn_cache.cleanup()
 
     tasks = [
         asyncio.create_task(sender.run(), name="sender"),
         asyncio.create_task(scheduler(sender, schedule), name="scheduler"),
         asyncio.create_task(housekeeping(), name="housekeeping"),
+        asyncio.create_task(_warn_watch.run(sender), name="warn-watch"),
     ]
 
     _LOGGER.info("Listening on channels %s%s", CHANNEL_IDXS, " and DMs" if ANSWER_DMS else "")

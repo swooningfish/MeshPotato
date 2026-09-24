@@ -57,7 +57,7 @@ If the location can't be found, the bot doesn't reply. The failed lookup is stil
 
 | Command | Reply |
 |---------|-------|
-| `!warn` / `!warn <location>` | Met Office weather warnings for the region |
+| `!warn` / `!warn <location>` | Met Office weather warnings for the region. Then posts any changes for 24 hours (see Warning alerts) |
 | `!warn <region code>` | Warnings for a region, for example `!warn nw` or `!warn uk` |
 | `!sun` / `!sun <location>` | Sunrise, sunset and hours of daylight today |
 | `!moon` | Moon phase, how much is lit, and the next full and new moon |
@@ -172,6 +172,26 @@ To cover a longer period in one message, space the hours out with `WXH_STEP_HOUR
 | `+2 more` | More warnings than fit in one message |
 
 Warnings that have ended are left out.
+
+#### Warning alerts
+
+After someone sends `!warn`, the bot keeps checking that region for 24 hours (`WARN_WATCH_HOURS`). It posts to the same channel or DM whenever the warnings change:
+
+```
+🔔 ⚠️ East of England: 🔴💨 Wind Thu 18:00-Fri 12:00 | 🟡🌧️ Rain Sat 06:00-21:00
+🔔 ✅ No weather warnings for East of England
+```
+
+- A post goes out when a warning is added, its level or times change, or it is cancelled early.
+- A warning that just runs out isn't posted.
+- Nothing is posted unless someone has sent `!warn`. A scheduled `{warn}` message doesn't start alerts.
+- Another `!warn` for the same region in the same place restarts the 24 hours.
+- The bot checks every 60 seconds (`WARN_WATCH_TICK_SEC`) and still uses the 10-minute cache, so a change posts up to about 11 minutes after the Met Office publishes it.
+- Up to 10 region and channel pairs are watched at once (`WARN_WATCH_MAX`). Further `!warn` requests still get a reply but don't start a watch.
+- While the bot is muted, changes are held back and posted when the mute ends.
+- Watches are kept in memory, so restarting the bot ends them.
+
+The Met Office regenerates the feed about every 5 minutes (the server's `Cache-Control: max-age` counts down a 300-second cycle). The feed content itself only changes when a warning is issued or updated.
 
 The Met Office issues warnings for 16 regions. The bot finds the region for a location by looking up the nearest postcode on postcodes.io. With no location it uses `DEFAULT_LOCATION`. You can also give a region code:
 
@@ -431,6 +451,9 @@ The bot reads `config.toml` from the folder `run_bot.py` is in. To use another f
 | `wxh_step_hours` | `1` | Gap between `!wxh` entries in hours |
 | `wxh_mention_reserve` | `25` | Bytes kept free for other text when `{wxh}` is used in a scheduled message |
 | `warn_cache_sec` | `600` | How long to reuse the Met Office warnings feed (10 minutes) |
+| `warn_watch_hours` | `24` | How long after a `!warn` the bot posts warning changes |
+| `warn_watch_max` | `10` | Most region and channel pairs watched at once |
+| `warn_watch_tick_sec` | `60` | How often watched regions are checked |
 | `max_reply_bytes` | `135` | MeshCore limits messages by bytes. Emojis take 4 to 7 bytes each |
 | `wx_cache_sec` | `1800` | How long to reuse a forecast (30 minutes) |
 | `wx_daily_call_budget` | `300` | Most Met Office calls per UTC day |
@@ -498,6 +521,12 @@ time = "08:30"
 days = ["sat", "sun"]
 channel = 1
 text = "{wxf}"
+
+[[scheduled_messages]]
+name = "morning-warnings"
+time = "07:00"
+channel = 1
+text = "{warn}"
 
 [[scheduled_messages]]
 name = "beacon"

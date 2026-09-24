@@ -29,7 +29,14 @@
 # use_mph = true
 # wxh_hours = 6
 # wxh_step_hours = 1
-# warn_cache_sec = 600             # reuse the Met Office warnings feed for 10 min
+# warn_cache_sec = 600              # reuse the Met Office warnings feed for 10 min
+
+# ---------- Weather warning alerts ----------
+# After someone sends !warn, the bot keeps checking that region and posts to the
+# same channel or DM when the warnings change. Nothing is posted until someone asks.
+# warn_watch_hours = 24             # keep posting changes for this long after the last !warn
+# warn_watch_max = 10               # most regions and channels watched at once
+# warn_watch_tick_sec = 60          # how often watched regions are checked (the feed is still cached)
 
 # Named places for !wx <name>. This replaces the built-in list.
 # [locations]
@@ -67,6 +74,15 @@
 # days = ["sat", "sun"]
 # channel = 1
 # text = "{wxf}"
+#
+# Weather warnings every morning. {warn} uses default_location; {warn:nw} or
+# {warn:Cromer} picks a region or place. A scheduled post doesn't start alerts,
+# only someone sending !warn does.
+# [[scheduled_messages]]
+# name = "morning-warnings"
+# time = "07:00"
+# channel = 1
+# text = "{warn}"
 #
 # [[scheduled_messages]]
 # name = "beacon"
