@@ -48,6 +48,11 @@
 # Met Office scale. Types left out (birch, alder, mugwort, ragweed) show the count only.
 # pollen_levels = { grass = [30, 50, 150] }   # add e.g. birch = [...] with your own thresholds
 
+# ---------- Radio conditions ----------
+# hf_cache_sec = 3600               # N0NBH HF/VHF feed. N0NBH asks for hourly fetches at most,
+#                                   # so anything under 3600 is raised to 3600
+# tropo_cache_sec = 3600            # UHF tropo forecast per place (Open-Meteo)
+
 # Named places for !wx <name>. This replaces the built-in list.
 # [locations]
 # Norwich = [52.6278, 1.2983]

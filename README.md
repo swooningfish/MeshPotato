@@ -1,6 +1,6 @@
 # MeshPotato 🥔: MeshCore WX, Ping, Bot
 
-A MeshCore chat bot for a Raspberry Pi running Arch Linux ARM. It answers ping and test commands, posts Met Office weather and weather warnings, gives sunrise, sunset, moon phase, aurora alerts, air quality and pollen, reports its own stats to admins, lets admins mute it or post as it, rate limits spam and sends scheduled messages. It runs as a systemd service and starts on boot.
+A MeshCore chat bot for a Raspberry Pi running Arch Linux ARM. It answers ping and test commands, posts Met Office weather and weather warnings, gives sunrise, sunset, moon phase, aurora alerts, air quality, pollen and HF, VHF and UHF radio conditions, reports its own stats to admins, lets admins mute it or post as it, rate limits spam and sends scheduled messages. It runs as a systemd service and starts on boot.
 
 Files in this repo:
 
@@ -89,7 +89,15 @@ Everything else keeps working. The startup log warns when no key is found.
 | `!aq` / `!aq <location>` | Air quality index and main pollutants now |
 | `!pollen` / `!pollen <location>` | Pollen forecast for the next 24 hours |
 
-Short aliases: `!warnings` = `!warn`, `!sunrise` and `!sunset` = `!sun`, `!solar` = `!aurora`, `!air` = `!aq`.
+#### Radio conditions (`!` required)
+
+| Command | Reply |
+|---------|-------|
+| `!hf` | HF band conditions for now (day or night), solar flux, K and A index, noise |
+| `!vhf` | 6m, 4m and 2m E-skip, VHF aurora and tropo |
+| `!uhf` / `!uhf <location>` | UHF tropospheric refraction now and the best in the next 24 hours |
+
+Short aliases: `!warnings` = `!warn`, `!sunrise` and `!sunset` = `!sun`, `!solar` = `!aurora`, `!air` = `!aq`, `!bands` = `!hf`, `!tropo` = `!uhf`.
 
 #### Admin commands (`!` required, admins only)
 
@@ -129,7 +137,7 @@ Short aliases: `!dice` = `!roll`, `!flip` and `!coin` = `!flipacoin`, `!8ball` =
 
 Dice, coin and eight ball use Python's `SystemRandom`, which draws on the operating system's random source.
 
-The path, fun, warning, sun, moon, aurora, air quality, pollen and status commands count toward the same rate limits as the weather commands.
+The path, fun, warning, sun, moon, aurora, air quality, pollen, radio conditions and status commands count toward the same rate limits as the weather commands.
 
 `<location>` accepts:
 
@@ -331,6 +339,52 @@ This is the European index, not the UK's 1 to 10 Daily Air Quality Index (DAQI),
 - **Out of season:** CAMS only forecasts pollen during the pollen season (roughly spring and summer). Outside it, the reply is `None forecast`.
 
 Both accept the same `<location>` forms as `!wx`. Add `{aq}`, `{aq:place}`, `{pollen}` or `{pollen:place}` to a scheduled message to post them at set times.
+
+### Radio conditions (!hf, !vhf, !uhf)
+
+```
+📻 HF night: 80-40m Good | 30-20m Good | 17-15m Fair | 12-10m Poor | SFI 112 K2 A19 | Noise S1-S2 | N0NBH
+📡 VHF: 6m Es Closed | 4m Es Closed | 2m Es Closed | Aurora Closed | Tropo Normal | N0NBH, Open-Meteo
+📶 Norwich UHF tropo: Normal now (-38 N/km) | next 24h similar | Open-Meteo
+📶 Norwich UHF tropo: Slightly enhanced now (-65 N/km) | 24h best Enhanced Thu 06h (-89) | Open-Meteo
+```
+
+**HF and VHF** come from the solar data feed by Paul, N0NBH, at [hamqsl.com](https://www.hamqsl.com/solar.html). It is free, and the author asks for credit and for no more than one fetch an hour, since that's how often the solar flux updates. The rest of the feed updates every 3 hours. The bot caches it for an hour (`HF_CACHE_SEC`) and never less, even if `config.toml` sets a lower value. One fetch serves both `!hf` and `!vhf`.
+
+`!hf` reads:
+
+- **Bands:** N0NBH's calculated conditions (Good, Fair or Poor) for four band groups. It shows the day or night figures depending on whether the sun is up at `DEFAULT_LOCATION`.
+- **SFI:** solar flux index. Higher is better for the upper HF bands.
+- **K and A:** geomagnetic indices. Lower is quieter and better. K is 0 to 9.
+- **Noise:** expected noise level (S-units), shown when it fits.
+
+`!vhf` reads:
+
+- **E-skip:** sporadic-E openings over Europe on 6m, 4m and 2m, from N0NBH.
+- **Aurora:** VHF aurora in the northern hemisphere, from N0NBH.
+- **Tropo:** the current level at `DEFAULT_LOCATION`, worked out the same way as `!uhf`. It is left out if the reply would be too long.
+
+**UHF** reach, including MeshCore's own 868 MHz, depends mostly on the lower atmosphere, not the sun. Beyond line of sight, the main effect is tropospheric refraction and ducting, which happens under temperature inversions. N0NBH has no UHF figures, so the bot works it out from the Open-Meteo weather forecast:
+
+1. It takes the temperature, humidity and pressure at 2 m and at the 925 hPa level, which is about 700 m up.
+2. It works out the radio refractivity N at both heights, using the ITU-R P.453 formula.
+3. It divides the difference by the height between them, which gives the refractivity gradient in N-units per km.
+
+A normal atmosphere is about -40 N/km. More negative means signals bend further back towards the ground and travel further.
+
+| Gradient (N/km) | Level | Meaning |
+|-----------------|-------|---------|
+| above 0 | Below normal | Signals bend up, range shorter than usual |
+| 0 to -60 | Normal | Standard atmosphere |
+| -60 to -79 | Slightly enhanced | Some extra range |
+| -79 to -157 | Enhanced | Super-refraction (ITU-R), clearly longer paths |
+| below -157 | Ducting likely | Ducting (ITU-R), paths of hundreds of km possible |
+
+The -79 and -157 limits are the ITU-R ones. -60 is the bot's own early hint. The 700 m layer averages out thin inversions, so real ducting near the ground can be stronger than the figure suggests. Treat the level as a guide, not a measurement. Ducting is most likely on calm nights and mornings under high pressure, and over the sea.
+
+`!uhf` accepts the same `<location>` forms as `!wx`. It uses the same free Open-Meteo terms as `!aq` (non-commercial, CC BY 4.0, credited in the reply) and caches each place for an hour (`TROPO_CACHE_SEC`). Places whose ground is close to the 925 hPa level, above about 700 m, can't be worked out and get `no forecast data`.
+
+Scheduled message tokens: `{hf}`, `{vhf}`, `{uhf}` and `{uhf:place}`.
 
 ### Stats and uptime (!stats, !uptime)
 
@@ -542,6 +596,8 @@ The bot reads `config.toml` from the folder `run_bot.py` is in. To use another f
 | `warn_watch_tick_sec` | `60` | How often watched regions are checked |
 | `aurora_cache_sec` | `300` | How long to reuse AuroraWatch UK data (5 minutes, never less than 180) |
 | `air_cache_sec` | `3600` | How long to reuse Open-Meteo air quality and pollen for a place (1 hour) |
+| `hf_cache_sec` | `3600` | How long to reuse the N0NBH HF/VHF feed (1 hour, never less) |
+| `tropo_cache_sec` | `3600` | How long to reuse a place's UHF tropo forecast (1 hour) |
 | `pollen_levels` | `{grass = [30, 50, 150]}` | Pollen counts where Moderate, High and Very high start, per type |
 | `max_reply_bytes` | `135` | MeshCore limits messages by bytes. Emojis take 4 to 7 bytes each |
 | `wx_cache_sec` | `1800` | How long to reuse a forecast (30 minutes) |
@@ -589,6 +645,9 @@ Tokens filled in at send time:
 | `{aurora}` | Aurora alert level and geomagnetic activity |
 | `{aq}` / `{aq:Ipswich}` | Air quality |
 | `{pollen}` / `{pollen:Ipswich}` | Pollen forecast |
+| `{hf}` | HF band conditions |
+| `{vhf}` | VHF E-skip, aurora and tropo |
+| `{uhf}` / `{uhf:Ipswich}` | UHF tropo |
 
 Example:
 
@@ -802,6 +861,8 @@ sudo timedatectl set-ntp true
 - Geocoding: postcodes.io
 - Aurora alerts: [AuroraWatch UK](https://aurorawatch.lancs.ac.uk/), Lancaster University
 - Air quality and pollen: [Open-Meteo](https://open-meteo.com/) (CC BY 4.0), from the Copernicus Atmosphere Monitoring Service (CAMS)
+- HF and VHF conditions: Paul, N0NBH, [hamqsl.com](https://www.hamqsl.com/solar.html)
+- UHF tropo: worked out from the [Open-Meteo](https://open-meteo.com/) weather forecast (CC BY 4.0) with the ITU-R P.453 refractivity formula
 
 ## License
 

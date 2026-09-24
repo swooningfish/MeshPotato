@@ -338,6 +338,125 @@ def test_aq_unknown_place_is_silent(monkeypatch):
     assert asyncio.run(bot.get_air("nowhere", mode="pollen")) == "POLLEN: 'nowhere' not found"
 
 
+HAMQSL_XML = b"""<?xml version="1.0" encoding="UTF-8" ?>
+<solar><solardata>
+<source url="http://www.hamqsl.com/solar.html">N0NBH</source>
+<solarflux>112</solarflux><aindex> 19</aindex><kindex> 2</kindex><sunspots>124</sunspots>
+<calculatedconditions>
+<band name="80m-40m" time="day">Fair</band><band name="30m-20m" time="day">Good</band>
+<band name="17m-15m" time="day">Fair</band><band name="12m-10m" time="day">Poor</band>
+<band name="80m-40m" time="night">Good</band><band name="30m-20m" time="night">Good</band>
+<band name="17m-15m" time="night">Fair</band><band name="12m-10m" time="night">Poor</band>
+</calculatedconditions>
+<calculatedvhfconditions>
+<phenomenon name="vhf-aurora" location="northern_hemi">Band Closed</phenomenon>
+<phenomenon name="E-Skip" location="europe">Band Closed</phenomenon>
+<phenomenon name="E-Skip" location="europe_6m">50MHz ES</phenomenon>
+<phenomenon name="E-Skip" location="europe_4m">Band Closed</phenomenon>
+</calculatedvhfconditions>
+<geomagfield>QUIET</geomagfield><signalnoise>S1-S2</signalnoise>
+</solardata></solar>"""
+
+
+def test_parse_hamqsl():
+    data = bot.parse_hamqsl(HAMQSL_XML)
+    assert (data["sfi"], data["a"], data["k"], data["noise"]) == ("112", "19", "2", "S1-S2")
+    assert data["hf"][("30m-20m", "night")] == "Good"
+    assert data["vhf"][("E-Skip", "europe_6m")] == "50MHz ES"
+
+
+def test_format_hf(monkeypatch):
+    data = bot.parse_hamqsl(HAMQSL_XML)
+    assert bot.format_hf(data, day=True) == ("📻 HF day: 80-40m Fair | 30-20m Good | 17-15m Fair | "
+                                             "12-10m Poor | SFI 112 K2 A19 | Noise S1-S2 | N0NBH")
+    assert bot.format_hf(data, day=False, budget=100) == ("📻 HF night: 80-40m Good | 30-20m Good | "
+                                                          "17-15m Fair | 12-10m Poor | SFI 112 K2 A19 | N0NBH")
+
+
+def test_format_vhf():
+    data = bot.parse_hamqsl(HAMQSL_XML)
+    assert bot.format_vhf(data, "Normal") == \
+        "📡 VHF: 6m Es 50MHz ES | 4m Es Closed | 2m Es Closed | Aurora Closed | Tropo Normal | N0NBH, Open-Meteo"
+    assert bot.format_vhf(data, "Normal", budget=90) == \
+        "📡 VHF: 6m Es 50MHz ES | 4m Es Closed | 2m Es Closed | Aurora Closed | N0NBH"
+
+
+def test_is_daytime(monkeypatch):
+    monkeypatch.setattr(bot, "TIMEZONE", LONDON)
+    assert bot.is_daytime(52.63, 1.30, datetime(2026, 9, 24, 12, tzinfo=LONDON))
+    assert not bot.is_daytime(52.63, 1.30, datetime(2026, 9, 24, 23, tzinfo=LONDON))
+
+
+def test_refractivity_standard_values():
+    # Sea level, 15°C, 1013 hPa, 60% humidity: about 320 N-units
+    assert 315 < bot.refractivity(15, 60, 1013) < 330
+    assert bot.refractivity(15, 0, 1013) == pytest.approx(77.6 / 288.15 * 1013)
+
+
+@pytest.mark.parametrize("gradient, level", [(10, "Below normal"), (-40, "Normal"), (-70, "Slightly enhanced"),
+                                             (-100, "Enhanced"), (-200, "Ducting likely")])
+def test_tropo_level(gradient, level):
+    assert bot.tropo_level(gradient) == level
+
+
+def _tropo_data(t925_values, rh925_values=None):
+    n = len(t925_values)
+    start = datetime(2026, 9, 24)
+    return {"elevation": 25.0, "hourly": {
+        "time": [(start + timedelta(hours=h)).strftime("%Y-%m-%dT%H:%M") for h in range(n)],
+        "temperature_2m": [10.0] * n, "relative_humidity_2m": [80.0] * n, "surface_pressure": [1020.0] * n,
+        "temperature_925hPa": t925_values, "relative_humidity_925hPa": rh925_values or [40.0] * n,
+        "geopotential_height_925hPa": [800.0] * n}}
+
+
+def test_tropo_outlook_finds_inversion():
+    # Warm, dry air above cool, moist air (an inversion) bends UHF back down
+    data = _tropo_data([5.0] * 6 + [16.0] + [5.0] * 17, [40.0] * 6 + [10.0] + [40.0] * 17)
+    grads = bot.tropo_gradients(data)
+    assert len(grads) == 24
+    outlook = bot.tropo_outlook(data, now=datetime(2026, 9, 24, 0, tzinfo=LONDON))
+    assert outlook["best_at"] == datetime(2026, 9, 24, 6)
+    assert outlook["best"] < outlook["now"]
+    text = bot.format_uhf(outlook, "Norwich")
+    assert text.startswith("📶 Norwich UHF tropo: ") and "24h best" in text and "Thu 06h" in text
+    assert bot.format_uhf(None, "Norwich") == "📶 Norwich UHF tropo: no forecast data | Open-Meteo"
+
+
+def test_tropo_skips_high_ground():
+    data = _tropo_data([5.0])
+    data["elevation"] = 790.0                       # ground almost at the 925 hPa level
+    assert bot.tropo_gradients(data) == []
+
+
+def test_radio_commands(monkeypatch):
+    fetches = []
+    monkeypatch.setattr(bot, "_hamqsl_cache", bot.TTLCache(bot.HAMQSL_MIN_CACHE_SEC))
+    monkeypatch.setattr(bot, "_tropo_cache", bot.TTLCache(60))
+    monkeypatch.setattr(bot, "_geocode_sync", lambda q: (52.6278, 1.2983, "Norwich"))
+    monkeypatch.setattr(bot, "_http_get", lambda url, headers=None, accept="": fetches.append(url) or HAMQSL_XML)
+    monkeypatch.setattr(bot, "_http_get_json", lambda url, headers=None: fetches.append(url) or _tropo_data([5.0] * 48))
+    assert bot.parse_command("!bands") == ("!hf", "")
+    assert bot.parse_command("!tropo Cromer") == ("!uhf", "Cromer")
+    assert asyncio.run(bot.run_command("!hf", "", "Alice", {})).startswith("@[Alice] 📻 HF ")
+    assert asyncio.run(bot.run_command("!vhf", "", "Alice", {})).startswith("@[Alice] 📡 VHF: 6m Es")
+    assert asyncio.run(bot.run_command("!uhf", "", "Alice", {})).startswith("@[Alice] 📶 Norwich UHF tropo:")
+    assert sum(u == bot.HAMQSL_URL for u in fetches) == 1       # one N0NBH fetch serves !hf and !vhf
+    assert sum(u.startswith(bot.TROPO_API) for u in fetches) == 1
+
+
+def test_radio_lookup_failures(monkeypatch):
+    def boom(*a, **k):
+        raise OSError("down")
+    monkeypatch.setattr(bot, "_hamqsl_cache", bot.TTLCache(bot.HAMQSL_MIN_CACHE_SEC))
+    monkeypatch.setattr(bot, "_tropo_cache", bot.TTLCache(60))
+    monkeypatch.setattr(bot, "_http_get", boom)
+    monkeypatch.setattr(bot, "_http_get_json", boom)
+    monkeypatch.setattr(bot, "_geocode_sync", lambda q: (52.6278, 1.2983, "Norwich"))
+    assert asyncio.run(bot.get_hf()) == "HF: lookup failed"
+    assert asyncio.run(bot.get_vhf()) == "VHF: lookup failed"
+    assert asyncio.run(bot.get_uhf("")) == "UHF: lookup failed"
+
+
 def test_help_fits_one_message(monkeypatch):
     monkeypatch.setattr(bot, "MET_OFFICE_API_KEY", "key")
     assert "!path" in bot.help_text()
@@ -443,9 +562,9 @@ def test_no_api_key_skips_weather(monkeypatch):
     assert asyncio.run(bot.get_weather("Cromer")) is None
     assert asyncio.run(bot.expand_tokens("Morning {wx} {wxf:Cromer}")).strip() == "Morning"
     help_text = bot.help_text()
-    assert "!wx" not in help_text and "!warn/!sun/!aq/!pollen [place]" in help_text
+    assert "!wx" not in help_text and "!path, !warn/!sun/" in help_text
     monkeypatch.setattr(bot, "MET_OFFICE_API_KEY", "key")
-    assert "!wx/!wxh/!wxf/!warn/!sun/!aq/!pollen [place]" in bot.help_text()
+    assert "!path, !wx/!wxh/!wxf/!warn/!sun/" in bot.help_text()
     assert bot.command_allowed("!wx", admin=False)
 
 
@@ -862,6 +981,8 @@ def restore_settings():
     bot._warn_cache.ttl = bot.WARN_CACHE_SEC
     bot._aurora_cache.ttl = max(bot.AURORA_MIN_CACHE_SEC, bot.AURORA_CACHE_SEC)
     bot._air_cache.ttl = bot.AIR_CACHE_SEC
+    bot._hamqsl_cache.ttl = max(bot.HAMQSL_MIN_CACHE_SEC, bot.HF_CACHE_SEC)
+    bot._tropo_cache.ttl = bot.TROPO_CACHE_SEC
 
 
 @pytest.mark.skipif(bot.tomllib is None, reason="needs Python 3.11+")
