@@ -88,9 +88,15 @@ if ! id -nG "$RUN_USER" | tr ' ' '\n' | grep -qx "$SERIAL_GROUP"; then
     sudo usermod -aG "$SERIAL_GROUP" "$RUN_USER"
 fi
 
-# API key: the service does not read ~/.bashrc, so store it in the key file
+# API key: the service does not read ~/.bashrc, so it needs the key in
+# config.toml or the key file
+CONFIG_FILE="${WORK_DIR}/config.toml"
 KEY_FILE="${RUN_HOME}/.config/meshcore/metoffice_key"
-if [[ ! -s "$KEY_FILE" ]]; then
+if [[ -f "$CONFIG_FILE" ]] && grep -Eq '^[[:space:]]*metoffice_api_key[[:space:]]*=[[:space:]]*"[^"]+' "$CONFIG_FILE"; then
+    # The file holds a secret, so keep it private
+    chmod 600 "$CONFIG_FILE"
+    echo "Using the API key in $CONFIG_FILE (set to mode 600)"
+elif [[ ! -s "$KEY_FILE" ]]; then
     if [[ -n "${METOFFICE_API_KEY:-}" ]]; then
         mkdir -p "$(dirname "$KEY_FILE")"
         umask 077
@@ -98,8 +104,8 @@ if [[ ! -s "$KEY_FILE" ]]; then
         chmod 600 "$KEY_FILE"
         echo "Saved METOFFICE_API_KEY to $KEY_FILE"
     else
-        echo "WARNING: no API key in $KEY_FILE and METOFFICE_API_KEY is not set."
-        echo "         !wx/!wxh/!wxf will fail until you create that file."
+        echo "WARNING: no API key found. Set metoffice_api_key in $CONFIG_FILE"
+        echo "         or put the key in $KEY_FILE. !wx/!wxh/!wxf fail until you do."
     fi
 fi
 

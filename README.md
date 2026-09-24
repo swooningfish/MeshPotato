@@ -247,7 +247,19 @@ sudo systemctl restart meshcore-meshpotato-bot
 
 ### 3.5 Store the API key
 
-The service doesn't read `~/.bashrc`, so keep the key in a file:
+The service doesn't read `~/.bashrc`, so keep the key in `config.toml` or in a key file.
+
+**Option A, in `config.toml`** (one place for everything):
+
+```bash
+cp config.example.toml config.toml        # if you haven't already
+nano config.toml                          # uncomment metoffice_api_key, paste the key between the quotes
+chmod 600 config.toml
+```
+
+Paste the whole key on one line. `config.toml` is ignored by git, so the key won't be committed.
+
+**Option B, in a key file:**
 
 ```bash
 mkdir -p ~/.config/meshcore
@@ -255,14 +267,17 @@ nano ~/.config/meshcore/metoffice_key     # paste the key, save
 chmod 600 ~/.config/meshcore/metoffice_key
 ```
 
-The bot looks for the key in this order:
+The bot looks for the key in this order and uses the first it finds:
 
 1. `METOFFICE_API_KEY` environment variable
-2. The file named in `METOFFICE_KEY_FILE`
-3. `~/.config/meshcore/metoffice_key`
-4. `metoffice_key.txt` in the same folder as the script
+2. `metoffice_api_key` in `config.toml`
+3. The file named in `METOFFICE_KEY_FILE`
+4. `~/.config/meshcore/metoffice_key`
+5. `metoffice_key.txt` in the same folder as the script
 
-If `METOFFICE_API_KEY` is already set in your shell when you run the installer, it writes the key file for you.
+The startup log says which one it used.
+
+If `config.toml` holds a key, the installer sets the file to mode 600. Otherwise, if `METOFFICE_API_KEY` is set in your shell when you run the installer, it writes the key file for you.
 
 ---
 
@@ -283,6 +298,7 @@ The bot reads `config.toml` from the folder `run_bot.py` is in. To use another f
 
 | Setting | Example (`config.toml`) | Notes |
 |---------|-------------------------|-------|
+| `metoffice_api_key` | `"paste-your-key-here"` | Met Office key. See section 3.5. `chmod 600 config.toml` if you use it |
 | `serial_port` | `"/dev/ttyACM0"` | Overridden by `--port` |
 | `channel_idxs` | `[1, 3]` | Channel slots the bot listens and replies on |
 | `answer_dms` | `true` | Reply to direct messages |
@@ -405,7 +421,7 @@ Look for these log lines:
 
 ```
 Settings loaded from /home/alarm/MeshPotato/config.toml
-Met Office API key loaded (1670 chars)
+Met Office API key loaded from /home/alarm/MeshPotato/config.toml (1670 chars)
 Connected on /dev/ttyACM0
 Scheduler running with 3 entries
 Listening on channels [1, 3] and DMs
@@ -455,7 +471,7 @@ The installer:
 
 1. Checks the script exists and `meshcore` imports.
 2. Adds you to the `uucp` group if needed.
-3. Writes the key file from `METOFFICE_API_KEY` if the file is missing.
+3. Sets `config.toml` to mode 600 if it holds the API key. Otherwise writes the key file from `METOFFICE_API_KEY` if that file is missing.
 4. Picks a stable `/dev/serial/by-id/` port name if you don't give `--port`.
 5. Writes `/etc/systemd/system/meshcore-meshpotato-bot.service`.
 6. Disables ModemManager if it's running, because it grabs `ttyACM` radios.

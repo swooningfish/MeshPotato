@@ -75,6 +75,7 @@ ANSWER_DMS = True               # reply to direct messages as well
 TIMEZONE = ZoneInfo("Europe/London")
 LOG_LEVEL = "INFO"              # DEBUG also logs every message that isn't a command
 
+METOFFICE_API_KEY = ""          # set in config.toml, never here. See _load_api_key for the lookup order
 WX_CACHE_SEC = 1800             # reuse a forecast for 30 min
 WX_DAILY_CALL_BUDGET = 300      # Met Office calls per UTC day (free tier: 360)
 GEOCODE_CACHE_SEC = 86400
@@ -142,20 +143,24 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 _LOGGER = logging.getLogger("meshpotato_bot")
 
 
-def _load_api_key() -> str:
-    """Key lookup order:
+def _clean_key(v: str) -> str:
+    return v.strip().strip('"').strip("'").strip()
+
+
+def _load_api_key() -> tuple[str, str]:
+    """Return (key, where it came from). Lookup order:
     1. METOFFICE_API_KEY environment variable
-    2. file named by METOFFICE_KEY_FILE
-    3. ~/.config/meshcore/metoffice_key
-    4. metoffice_key.txt next to this script
+    2. metoffice_api_key in config.toml
+    3. file named by METOFFICE_KEY_FILE
+    4. ~/.config/meshcore/metoffice_key
+    5. metoffice_key.txt next to this script
     Quotes, spaces and Windows line endings are stripped.
     """
-    def clean(v: str) -> str:
-        return v.strip().strip('"').strip("'").strip()
-
-    key = clean(os.environ.get("METOFFICE_API_KEY", ""))
+    key = _clean_key(os.environ.get("METOFFICE_API_KEY", ""))
     if key:
-        return key
+        return key, "METOFFICE_API_KEY"
+    if METOFFICE_API_KEY:
+        return METOFFICE_API_KEY, "config"
     candidates = [
         os.environ.get("METOFFICE_KEY_FILE", ""),
         os.path.expanduser("~/.config/meshcore/metoffice_key"),
@@ -165,15 +170,16 @@ def _load_api_key() -> str:
         if path and os.path.isfile(path):
             try:
                 with open(path, encoding="utf-8") as fh:
-                    key = clean(fh.read())
+                    key = _clean_key(fh.read())
                 if key:
-                    return key
+                    return key, path
             except OSError:
                 pass
-    return ""
+    return "", ""
 
 
-MET_OFFICE_API_KEY = _load_api_key()
+# The key in use. load_config() looks it up again once config.toml is read.
+MET_OFFICE_API_KEY, MET_OFFICE_KEY_SOURCE = _load_api_key()
 MET_OFFICE_BASE = "https://data.hub.api.metoffice.gov.uk/sitespecific/v0/point/"
 
 # =====================================================================
@@ -197,6 +203,7 @@ def _log_level(v: Any) -> str:
 # Settings that config.toml may set. A converter turns the TOML value into the
 # Python type; None means the value must match the type of the default.
 _CONFIG_SETTINGS: dict[str, Optional[Callable[[Any], Any]]] = {
+    "METOFFICE_API_KEY": lambda v: _clean_key(str(v)),
     "SERIAL_PORT": None,
     "BAUDRATE": None,
     "CHANNEL_IDXS": lambda v: [int(x) for x in v],
@@ -264,6 +271,10 @@ def load_config(path: Optional[str] = None) -> Optional[str]:
             raise SystemExit(f"Bad value for '{key}' in {path}: {ex}")
         g[name] = value
 
+    global MET_OFFICE_API_KEY, MET_OFFICE_KEY_SOURCE
+    MET_OFFICE_API_KEY, MET_OFFICE_KEY_SOURCE = _load_api_key()
+    if MET_OFFICE_KEY_SOURCE == "config":
+        MET_OFFICE_KEY_SOURCE = path
     _wx_cache.ttl = WX_CACHE_SEC
     _geo_cache.ttl = GEOCODE_CACHE_SEC
     return path
@@ -1064,11 +1075,12 @@ async def run_command(cmd: str, arg: str, sender_name: str, rx_info: dict[str, A
 # =====================================================================
 async def main(port: str) -> None:
     if not MET_OFFICE_API_KEY:
-        _LOGGER.warning("Met Office API key not found (env METOFFICE_API_KEY, "
-                        "~/.config/meshcore/metoffice_key or metoffice_key.txt). "
+        _LOGGER.warning("Met Office API key not found (env METOFFICE_API_KEY, metoffice_api_key "
+                        "in config.toml, ~/.config/meshcore/metoffice_key or metoffice_key.txt). "
                         "!wx/!wxh/!wxf will reply with an error.")
     else:
-        _LOGGER.info("Met Office API key loaded (%d chars)", len(MET_OFFICE_API_KEY))
+        _LOGGER.info("Met Office API key loaded from %s (%d chars)",
+                     MET_OFFICE_KEY_SOURCE, len(MET_OFFICE_API_KEY))
 
     meshcore = await MeshCore.create_serial(port, BAUDRATE, debug=False, auto_reconnect=True)
     if meshcore is None:

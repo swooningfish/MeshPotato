@@ -5,6 +5,14 @@
 #
 # config.toml is ignored by git, so `git pull` never clashes with your edits.
 # Any setting left out keeps the default in run_bot.py. Needs Python 3.11 or newer.
+#
+# If you put your API key in here, keep the file private:
+#   chmod 600 config.toml
+
+# ---------- Met Office ----------
+# Paste the whole key (about 1670 characters) on one line between the quotes.
+# The METOFFICE_API_KEY environment variable wins over this if both are set.
+# metoffice_api_key = "paste-your-key-here"
 
 # ---------- Radio ----------
 # serial_port = "/dev/ttyACM0"      # --port on the command line wins over this

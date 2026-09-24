@@ -271,7 +271,8 @@ def test_validate_schedule_drops_bad_entries():
 # ---------- config.toml ----------
 @pytest.fixture
 def restore_settings():
-    saved = {name: getattr(bot, name) for name in bot._CONFIG_SETTINGS}
+    saved = {name: getattr(bot, name)
+             for name in [*bot._CONFIG_SETTINGS, "MET_OFFICE_API_KEY", "MET_OFFICE_KEY_SOURCE"]}
     yield
     for name, value in saved.items():
         setattr(bot, name, value)
@@ -310,6 +311,26 @@ def test_load_config_rejects_bad_values(tmp_path, restore_settings, line):
     path.write_text(line + "\n", encoding="utf-8")
     with pytest.raises(SystemExit):
         bot.load_config(str(path))
+
+
+@pytest.mark.skipif(bot.tomllib is None, reason="needs Python 3.11+")
+def test_api_key_from_config(tmp_path, restore_settings, monkeypatch):
+    monkeypatch.delenv("METOFFICE_API_KEY", raising=False)
+    path = tmp_path / "config.toml"
+    path.write_text('metoffice_api_key = "  from-config  "\n', encoding="utf-8")
+    bot.load_config(str(path))
+    assert bot.MET_OFFICE_API_KEY == "from-config"
+    assert bot.MET_OFFICE_KEY_SOURCE == str(path)
+
+
+@pytest.mark.skipif(bot.tomllib is None, reason="needs Python 3.11+")
+def test_api_key_env_wins_over_config(tmp_path, restore_settings, monkeypatch):
+    monkeypatch.setenv("METOFFICE_API_KEY", "from-env")
+    path = tmp_path / "config.toml"
+    path.write_text('metoffice_api_key = "from-config"\n', encoding="utf-8")
+    bot.load_config(str(path))
+    assert bot.MET_OFFICE_API_KEY == "from-env"
+    assert bot.MET_OFFICE_KEY_SOURCE == "METOFFICE_API_KEY"
 
 
 def test_load_config_missing_file(tmp_path, monkeypatch):
