@@ -145,9 +145,9 @@ def test_format_hops():
 
 def test_format_rx_report():
     info = {"path_len": 2, "path_nodes": ["a1", "b2"], "snr": 7.5, "rssi": -85}
-    assert bot.format_rx_report(info) == "(2 hops, a1:b2) SNR 7.5dB RSSI -85dBm"
-    assert bot.format_rx_report({"path_len": 0, "snr": 10.0}) == "(0 hops, direct) SNR 10dB"
-    assert bot.format_rx_report({}) == "(? hops, ?)"
+    assert bot.format_rx_report(info) == "(2 hops) SNR 7.5dB RSSI -85dBm"
+    assert bot.format_rx_report({"path_len": 0, "snr": 10.0}) == "(0 hops) SNR 10dB"
+    assert bot.format_rx_report({}) == "(? hops)"
 
 
 # ---------- commands ----------
@@ -158,7 +158,7 @@ def test_ping_shows_only_hops():
 
 def test_test_shows_rx_report():
     info = {"path_len": 2, "path_nodes": ["a1", "b2"], "snr": 7.5, "rssi": -85}
-    assert asyncio.run(bot.run_command("test", "", "", info)) == "Test OK (2 hops, a1:b2) SNR 7.5dB RSSI -85dBm"
+    assert asyncio.run(bot.run_command("test", "", "", info)) == "Test OK (2 hops) SNR 7.5dB RSSI -85dBm"
 
 
 def test_wx_unknown_place_is_silent(monkeypatch):

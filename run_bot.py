@@ -6,7 +6,7 @@ Built on the patterns in meshcore_py/examples/serial_pingbot.py and meshcore_py/
 
 Commands (channel or direct message):
   ping               -> Pong with hop count         (whole message, a leading ! is optional)
-  test               -> Test OK with hops, path, SNR and RSSI (same rules as ping)
+  test               -> Test OK with hop count, SNR and RSSI (same rules as ping)
   !wx [location]     -> Current conditions from Met Office DataHub (hourly)
   !wxh [location]    -> Next few hours, hour by hour (hourly)
   !wxf [location]    -> 3-day forecast from Met Office DataHub (daily)
@@ -369,18 +369,9 @@ def format_hops(info: dict[str, Any]) -> str:
 
 
 def format_rx_report(info: dict[str, Any]) -> str:
-    """test: '(2 hops, a1:b2) SNR 7.5dB RSSI -85dBm'."""
-    n = info.get("path_len")
-    if info.get("direct"):
-        path = "(direct route)"
-    elif n is None:
-        path = "(? hops, ?)"
-    elif n == 0:
-        path = "(0 hops, direct)"
-    else:
-        nodes = info.get("path_nodes") or []
-        path = f"({_hops(n)}, {':'.join(nodes) if nodes else '?'})"
-    parts = [path]
+    """test: '(2 hops) SNR 7.5dB RSSI -85dBm'. The path addresses are left out,
+    because a long path pushes the reply past MAX_REPLY_BYTES."""
+    parts = [format_hops(info)]
     if info.get("snr") is not None:
         parts.append(f"SNR {info['snr']:g}dB")
     if info.get("rssi") is not None:
