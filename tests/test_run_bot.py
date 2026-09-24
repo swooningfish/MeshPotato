@@ -215,6 +215,58 @@ def test_path_command_and_trace_alias(monkeypatch):
     assert bot.format_path({"path_len": 2, "path_nodes": ["a1", "b2"]}, bot.repeater_names()) == "Path 2 hops: a1 > b2"
 
 
+AURORA_STATUS_XML = b"""<?xml version='1.0' encoding='UTF-8' standalone='yes'?>
+<current_status api_version="0.2.5"><updated><datetime>2026-09-24T21:30:32+0000</datetime></updated>
+<site_status project_id="project:AWN" site_id="site:AWN:SUM" status_id="amber"/></current_status>"""
+AURORA_ACTIVITY_XML = b"""<?xml version='1.0' encoding='UTF-8' standalone='yes'?>
+<site_activity api_version="0.2.5" project_id="project:AWN" site_id="site:AWN:SUM">
+<lower_threshold status_id="yellow">50</lower_threshold>
+<activity status_id="green"><datetime>2026-09-24T19:00:00+0000</datetime><value>27.2</value></activity>
+<activity status_id="red"><datetime>2026-09-24T20:00:00+0000</datetime><value>212.6</value></activity>
+<activity status_id="amber"><datetime>2026-09-24T21:00:00+0000</datetime><value>131.4</value></activity>
+</site_activity>"""
+
+
+def test_parse_aurora():
+    assert bot.parse_aurora_status(AURORA_STATUS_XML) == "amber"
+    assert bot.parse_aurora_activity(AURORA_ACTIVITY_XML) == [27.2, 212.6, 131.4]
+
+
+def test_format_aurora(monkeypatch):
+    data = {"status": "amber", "activity": [27.2, 212.6, 131.4]}
+    assert bot.format_aurora(data) == \
+        "🟠 Amber: Amber alert: possible aurora | 131nT now, 213nT peak 24h | AuroraWatch UK"
+    assert bot.format_aurora({"status": "green", "activity": []}) == \
+        "🟢 Green: No significant activity | AuroraWatch UK"
+    monkeypatch.setattr(bot, "USE_EMOJI", False)
+    assert bot.format_aurora({"status": "red", "activity": [250.0]}) == \
+        "Aurora Red: Red alert: aurora likely | 250nT now, 250nT peak 24h | AuroraWatch UK"
+
+
+def test_aurora_is_cached_and_identified(monkeypatch):
+    calls = []
+
+    def fake_get(url, headers=None, accept=""):
+        calls.append(headers)
+        return AURORA_STATUS_XML if url == bot.AURORA_STATUS_URL else AURORA_ACTIVITY_XML
+    monkeypatch.setattr(bot, "_http_get", fake_get)
+    monkeypatch.setattr(bot, "_aurora_cache", bot.TTLCache(bot.AURORA_MIN_CACHE_SEC))
+    assert bot.parse_command("!solar") == ("!aurora", "")
+    first = asyncio.run(bot.run_command("!aurora", "", "Alice", {}))
+    assert first.startswith("@[Alice] 🟠 Amber:")
+    asyncio.run(bot.run_command("!aurora", "", "Bob", {}))
+    assert len(calls) == 2                                  # one status + one activity, then cached
+    assert all(h.get("Referer") for h in calls)
+
+
+def test_aurora_lookup_failure(monkeypatch):
+    def boom(*a, **k):
+        raise OSError("down")
+    monkeypatch.setattr(bot, "_http_get", boom)
+    monkeypatch.setattr(bot, "_aurora_cache", bot.TTLCache(bot.AURORA_MIN_CACHE_SEC))
+    assert asyncio.run(bot.get_aurora()) == "AURORA: lookup failed"
+
+
 def test_help_fits_one_message():
     assert "!path" in bot.HELP_TEXT
     assert len(bot.HELP_TEXT.encode("utf-8")) <= bot.MAX_REPLY_BYTES
@@ -700,6 +752,7 @@ def restore_settings():
     bot._wx_cache.ttl = bot.WX_CACHE_SEC
     bot._geo_cache.ttl = bot.GEOCODE_CACHE_SEC
     bot._warn_cache.ttl = bot.WARN_CACHE_SEC
+    bot._aurora_cache.ttl = max(bot.AURORA_MIN_CACHE_SEC, bot.AURORA_CACHE_SEC)
 
 
 @pytest.mark.skipif(bot.tomllib is None, reason="needs Python 3.11+")

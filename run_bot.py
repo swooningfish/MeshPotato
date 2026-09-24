@@ -14,6 +14,7 @@ Commands (channel or direct message):
   !warn [location]   -> Met Office weather warnings for the region, then posts changes for a while
   !sun [location]    -> Sunrise, sunset and hours of daylight today
   !moon              -> Moon phase, % lit and the next full and new moon
+  !aurora / !solar   -> Geomagnetic activity and aurora alert level from AuroraWatch UK
   !stats             -> Commands served, messages heard, Met Office calls used (admin DMs only)
   !uptime            -> How long the bot (and the computer) has been up (admin DMs only)
   !mute <minutes>    -> Stop replies and scheduled messages for a while (admin DMs only)
@@ -111,6 +112,7 @@ WARN_CACHE_SEC = 600            # reuse the Met Office warnings feed for 10 min
 WARN_WATCH_HOURS = 24           # after a !warn, post changes to that region's warnings for this long
 WARN_WATCH_MAX = 10             # most regions and channels watched at once
 WARN_WATCH_TICK_SEC = 60        # how often watched regions are checked
+AURORA_CACHE_SEC = 300          # reuse AuroraWatch UK data for 5 min (never less than 3 min, their rule)
 
 # ---------- Rate limits: (max_events, window_seconds) ----------
 RATE_LIMIT_GLOBAL = (20, 60)        # all commands across the bot
@@ -148,7 +150,7 @@ EIGHTBALL_ANSWERS = [
 #   "at": "MM-DD HH:MM"             same date every year
 #   "every_minutes": N              repeating interval, optional "start": "HH:MM"
 # Text tokens: {time} {date} {wx} {wx:place} {wxh} {wxh:place} {wxf} {wxf:place}
-#              {warn} {warn:place} {sun} {sun:place} {moon}
+#              {warn} {warn:place} {sun} {sun:place} {moon} {aurora}
 SCHEDULED_MESSAGES: list[dict[str, Any]] = [
     {"name": "morning-wx", "time": "07:30", "days": ["mon", "tue", "wed", "thu", "fri"],
      "channel": 1, "text": "Morning WX {wx}"},
@@ -247,6 +249,7 @@ _CONFIG_SETTINGS: dict[str, Optional[Callable[[Any], Any]]] = {
     "WARN_WATCH_HOURS": None,
     "WARN_WATCH_MAX": None,
     "WARN_WATCH_TICK_SEC": None,
+    "AURORA_CACHE_SEC": None,
     "RATE_LIMIT_GLOBAL": _pair,
     "RATE_LIMIT_PER_USER": _pair,
     "RATE_LIMIT_PER_CHANNEL": _pair,
@@ -304,6 +307,7 @@ def load_config(path: Optional[str] = None) -> Optional[str]:
     _wx_cache.ttl = WX_CACHE_SEC
     _geo_cache.ttl = GEOCODE_CACHE_SEC
     _warn_cache.ttl = WARN_CACHE_SEC
+    _aurora_cache.ttl = max(AURORA_MIN_CACHE_SEC, AURORA_CACHE_SEC)
     return path
 
 
@@ -1298,6 +1302,81 @@ def format_moon(now: Optional[datetime] = None) -> str:
 
 
 # =====================================================================
+# Aurora and space weather (AuroraWatch UK, Lancaster University, free, no key)
+# Terms: non-commercial use, credit AuroraWatch UK, no more than one request per
+# 3 minutes, keep their level names and colours. https://aurorawatch.lancs.ac.uk/api-info/
+# =====================================================================
+AURORA_API = "https://aurorawatch-api.lancs.ac.uk/0.2/status/"
+AURORA_STATUS_URL = AURORA_API + "current-status.xml"
+AURORA_ACTIVITY_URL = AURORA_API + "project/awn/sum-activity.xml"
+AURORA_HEADERS = {"Referer": "https://github.com/swooningfish/MeshPotato"}
+AURORA_MIN_CACHE_SEC = 180      # the API asks for at least 3 minutes between requests
+# Level -> (emoji, AuroraWatch UK's own description)
+AURORA_LEVELS = {
+    "green": ("🟢", "No significant activity"),
+    "yellow": ("🟡", "Minor geomagnetic activity"),
+    "amber": ("🟠", "Amber alert: possible aurora"),
+    "red": ("🔴", "Red alert: aurora likely"),
+}
+AURORA_CREDIT = "AuroraWatch UK"
+
+_aurora_cache = TTLCache(max(AURORA_MIN_CACHE_SEC, AURORA_CACHE_SEC))
+
+
+def parse_aurora_status(xml_bytes: bytes) -> str:
+    site = ET.fromstring(xml_bytes).find("site_status")
+    return (site.get("status_id") if site is not None else "") or ""
+
+
+def parse_aurora_activity(xml_bytes: bytes) -> list[float]:
+    """Hourly disturbance in nT, oldest first. The last value is the hour so far."""
+    values = []
+    for a in ET.fromstring(xml_bytes).iter("activity"):
+        try:
+            values.append(float(a.findtext("value") or ""))
+        except ValueError:
+            continue
+    return values
+
+
+def _fetch_aurora_sync() -> dict:
+    cached = _aurora_cache.get("aurora")
+    if cached is not None:
+        return cached
+    accept = "application/xml, text/xml"
+    status = parse_aurora_status(_http_get(AURORA_STATUS_URL, AURORA_HEADERS, accept=accept))
+    try:
+        activity = parse_aurora_activity(_http_get(AURORA_ACTIVITY_URL, AURORA_HEADERS, accept=accept))
+    except Exception as ex:         # the level alone is still worth a reply
+        _LOGGER.warning("AuroraWatch activity feed failed: %s", ex)
+        activity = []
+    data = {"status": status, "activity": activity}
+    _aurora_cache.put("aurora", data)
+    return data
+
+
+def format_aurora(data: dict) -> str:
+    """'🟢 Green: No significant activity | 27nT now, 62nT peak 24h | AuroraWatch UK'."""
+    level = (data.get("status") or "").lower()
+    emoji, description = AURORA_LEVELS.get(level, ("❔", "Status unknown"))
+    parts = [f"{emoji} {level.capitalize()}: {description}" if USE_EMOJI and level in AURORA_LEVELS
+             else f"Aurora {level.capitalize() or '?'}: {description}"]
+    activity = data.get("activity") or []
+    if activity:
+        parts.append(f"{activity[-1]:.0f}nT now, {max(activity[-24:]):.0f}nT peak 24h")
+    parts.append(AURORA_CREDIT)
+    return " | ".join(parts)
+
+
+async def get_aurora() -> str:
+    try:
+        return format_aurora(await asyncio.to_thread(_fetch_aurora_sync))
+    except Exception as ex:
+        _LOGGER.warning("AuroraWatch lookup failed: %s", ex)
+        return "AURORA: lookup failed"
+
+
+# =====================================================================
 # Text helpers
 # =====================================================================
 def trim(text: str, limit: Optional[int] = None) -> str:
@@ -1323,9 +1402,10 @@ def split_sender(text: str) -> tuple[str, str]:
 PLAIN_COMMANDS = {"ping", "test"}
 # Commands that only work with a leading "!" (returned as "!name")
 BANG_COMMANDS = {"help", "roll", "flipacoin", "eightball", "wx", "wxh", "wxf",
-                 "warn", "sun", "moon", "path", "stats", "uptime", "mute", "unmute", "say"}
+                 "warn", "sun", "moon", "aurora", "path", "stats", "uptime", "mute", "unmute", "say"}
 COMMAND_ALIASES = {"8ball": "eightball", "flip": "flipacoin", "coin": "flipacoin", "dice": "roll",
-                   "warnings": "warn", "sunrise": "sun", "sunset": "sun", "trace": "path"}
+                   "warnings": "warn", "sunrise": "sun", "sunset": "sun", "trace": "path",
+                   "solar": "aurora"}
 
 
 def parse_command(body: str) -> tuple[str, str]:
@@ -1364,6 +1444,8 @@ async def expand_tokens(text: str) -> str:
         text = text.replace(m.group(0), replacement or "", 1)
     if "{moon}" in text:
         text = text.replace("{moon}", format_moon())
+    if "{aurora}" in text:
+        text = text.replace("{aurora}", await get_aurora())
     return text
 
 
@@ -1602,7 +1684,7 @@ async def scheduler(sender: Sender, entries: list[dict]) -> None:
 # =====================================================================
 # Command handling
 # =====================================================================
-HELP_TEXT = ("Cmds: ping, test, !wx/!wxh/!wxf [place], !warn [place], !sun [place], !moon, !path, "
+HELP_TEXT = ("Cmds: ping, test, !wx/!wxh/!wxf [place], !warn [place], !sun [place], !moon, !aurora, !path, "
              "!roll [2d6], !flip, !8ball <q>, !help")
 # Only answered in a DM from a key in ADMIN_PUBKEYS. Channel messages carry no key,
 # so these are never answered in a channel.
@@ -1739,6 +1821,8 @@ async def run_command(cmd: str, arg: str, sender_name: str, rx_info: dict[str, A
         return mention + text if text else None
     if cmd == "!moon":
         return mention + format_moon()
+    if cmd == "!aurora":
+        return mention + await get_aurora()
     if cmd == "!stats":
         return mention + format_stats(await _battery_mv(), budget=budget)
     if cmd == "!uptime":
@@ -1915,6 +1999,7 @@ if __name__ == "__main__":
                     help="print a !warn reply and exit (no radio)")
     ap.add_argument("--sun", metavar="LOCATION", nargs="?", const="", help="print a !sun reply and exit (no radio)")
     ap.add_argument("--moon", action="store_true", help="print a !moon reply and exit (no radio)")
+    ap.add_argument("--aurora", action="store_true", help="print an !aurora reply and exit (no radio)")
     args = ap.parse_args()
 
     loaded = load_config(args.config)
@@ -1934,6 +2019,8 @@ if __name__ == "__main__":
             print(trim(asyncio.run(get_sun(args.sun)) or ""))
         elif args.moon:
             print(trim(format_moon()))
+        elif args.aurora:
+            print(trim(asyncio.run(get_aurora())))
         else:
             asyncio.run(main(args.port or SERIAL_PORT))
     except KeyboardInterrupt:

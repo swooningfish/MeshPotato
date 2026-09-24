@@ -38,6 +38,10 @@
 # warn_watch_max = 10               # most regions and channels watched at once
 # warn_watch_tick_sec = 60          # how often watched regions are checked (the feed is still cached)
 
+# ---------- Aurora (AuroraWatch UK) ----------
+# aurora_cache_sec = 300            # reuse the data for 5 min. AuroraWatch UK asks for no more than
+#                                   # one request per 3 min, so anything under 180 is raised to 180
+
 # Named places for !wx <name>. This replaces the built-in list.
 # [locations]
 # Norwich = [52.6278, 1.2983]

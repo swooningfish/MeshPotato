@@ -1,6 +1,6 @@
 # MeshPotato 🥔: MeshCore WX, Ping, Bot
 
-A MeshCore chat bot for a Raspberry Pi running Arch Linux ARM. It answers ping and test commands, posts Met Office weather and weather warnings, gives sunrise, sunset and moon phase, reports its own stats to admins, lets admins mute it or post as it, rate limits spam and sends scheduled messages. It runs as a systemd service and starts on boot.
+A MeshCore chat bot for a Raspberry Pi running Arch Linux ARM. It answers ping and test commands, posts Met Office weather and weather warnings, gives sunrise, sunset, moon phase and aurora alerts, reports its own stats to admins, lets admins mute it or post as it, rate limits spam and sends scheduled messages. It runs as a systemd service and starts on boot.
 
 Files in this repo:
 
@@ -77,8 +77,9 @@ If the location can't be found, the bot doesn't reply. The failed lookup is stil
 | `!warn <region code>` | Warnings for a region, for example `!warn nw` or `!warn uk` |
 | `!sun` / `!sun <location>` | Sunrise, sunset and hours of daylight today |
 | `!moon` | Moon phase, how much is lit, and the next full and new moon |
+| `!aurora` | Geomagnetic activity and aurora alert level from AuroraWatch UK |
 
-Short aliases: `!warnings` = `!warn`, `!sunrise` and `!sunset` = `!sun`.
+Short aliases: `!warnings` = `!warn`, `!sunrise` and `!sunset` = `!sun`, `!solar` = `!aurora`.
 
 #### Admin commands (`!` required, admins only)
 
@@ -118,7 +119,7 @@ Short aliases: `!dice` = `!roll`, `!flip` and `!coin` = `!flipacoin`, `!8ball` =
 
 Dice, coin and eight ball use Python's `SystemRandom`, which draws on the operating system's random source.
 
-The path, fun, warning, sun, moon and status commands count toward the same rate limits as the weather commands.
+The path, fun, warning, sun, moon, aurora and status commands count toward the same rate limits as the weather commands.
 
 `<location>` accepts:
 
@@ -261,6 +262,35 @@ New moon, first quarter, full moon and last quarter are shown for about a day ei
 Admin DMs still work while muted, so you can check or end the mute and use `!say`. A new `!mute` replaces the old one. The mute is kept in memory, so restarting the bot ends it. Set the longest mute with `mute_max_minutes`.
 
 `!say` posts to any channel slot, not only the ones in `CHANNEL_IDXS`. The text is cut to `MAX_REPLY_BYTES`. The reply `📢 Queued for ch1` means the message is in the send queue. If the radio then refuses it, for example because the slot has no channel, the failure is only logged.
+
+### Aurora and space weather (!aurora, !solar)
+
+`!aurora` shows how disturbed the Earth's magnetic field is over the UK, from [AuroraWatch UK](https://aurorawatch.lancs.ac.uk/) at Lancaster University. It is free and needs no key.
+
+```
+🟢 Green: No significant activity | 11nT now, 62nT peak 24h | AuroraWatch UK
+🟠 Amber: Amber alert: possible aurora | 131nT now, 213nT peak 24h | AuroraWatch UK
+```
+
+| Part | Meaning |
+|------|---------|
+| 🟢 🟡 🟠 🔴 | AuroraWatch UK alert level: green, yellow, amber, red |
+| `11nT now` | Disturbance so far this hour, in nanotesla |
+| `62nT peak 24h` | Highest hourly disturbance in the last 24 hours |
+
+AuroraWatch UK sets the levels. Yellow starts at 50 nT, amber at 100 nT and red at 200 nT.
+
+A disturbed field also means a disturbed ionosphere, which makes HF propagation unreliable and can cause HF blackouts at high latitudes. MeshCore itself runs on UHF (868 MHz), which doesn't use the ionosphere, so the mesh is barely affected. `!aurora` is mainly useful for HF operators and aurora watchers on the mesh.
+
+The AuroraWatch UK API terms shape how the bot uses it:
+
+- **Use:** non-commercial only.
+- **Credit:** every reply names AuroraWatch UK.
+- **Polling:** no more than one request every 3 minutes. The bot caches for 5 minutes (`AURORA_CACHE_SEC`) and never less than 3, even if `config.toml` sets a lower value.
+- **Identification:** requests carry a `Referer` header pointing at this repo.
+- **Levels:** the bot uses AuroraWatch UK's level names and descriptions unchanged.
+
+Add `{aurora}` to a scheduled message to post it at set times.
 
 ### Stats and uptime (!stats, !uptime)
 
@@ -470,6 +500,7 @@ The bot reads `config.toml` from the folder `run_bot.py` is in. To use another f
 | `warn_watch_hours` | `24` | How long after a `!warn` the bot posts warning changes |
 | `warn_watch_max` | `10` | Most region and channel pairs watched at once |
 | `warn_watch_tick_sec` | `60` | How often watched regions are checked |
+| `aurora_cache_sec` | `300` | How long to reuse AuroraWatch UK data (5 minutes, never less than 180) |
 | `max_reply_bytes` | `135` | MeshCore limits messages by bytes. Emojis take 4 to 7 bytes each |
 | `wx_cache_sec` | `1800` | How long to reuse a forecast (30 minutes) |
 | `wx_daily_call_budget` | `300` | Most Met Office calls per UTC day |
@@ -513,6 +544,7 @@ Tokens filled in at send time:
 | `{warn}` / `{warn:Ipswich}` | Weather warnings for the region |
 | `{sun}` / `{sun:Ipswich}` | Sunrise, sunset and daylight |
 | `{moon}` | Moon phase |
+| `{aurora}` | Aurora alert level and geomagnetic activity |
 
 Example:
 
