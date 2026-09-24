@@ -1,3 +1,6 @@
+# Local settings (copy config.example.toml)
+config.toml
+
 # Secrets: Met Office API key read by run_bot.py
 metoffice_key.txt
 metoffice_key

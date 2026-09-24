@@ -25,7 +25,8 @@ Features:
   - Global, per-user and per-channel sliding-window rate limits
   - Outgoing transmit queue with a minimum gap between radio sends
   - Scheduled messages: daily times, weekday filters, one-shot timestamps, intervals
-  - Weather and geocode caching to protect the Met Office free-tier quota
+  - Weather and geocode caching plus a daily call budget for the Met Office free tier
+  - Settings can be overridden from config.toml (Python 3.11+)
 
 Setup:
   pip install meshcore
@@ -42,62 +43,40 @@ import logging
 import os
 import random
 import re
+import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from collections import defaultdict, deque
-from datetime import datetime, timedelta
-from typing import Any, Optional
+from datetime import datetime, timedelta, timezone
+from typing import Any, Callable, Optional
 from zoneinfo import ZoneInfo
+
+try:
+    import tomllib                  # Python 3.11+
+except ModuleNotFoundError:         # Python 3.10: config.toml is not supported
+    tomllib = None
 
 from meshcore import MeshCore, EventType
 
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+
 # =====================================================================
 # Config
+# Defaults below. Override any of them in config.toml (see config.example.toml)
+# using the same names in lower case.
 # =====================================================================
-SERIAL_PORT = "/dev/ttyACM0"            # override with --port
+SERIAL_PORT = "/dev/ttyACM0"    # override with --port
 BAUDRATE = 115200
 
 CHANNEL_IDXS = [1, 3]           # channels the bot listens and replies on
-
 ANSWER_DMS = True               # reply to direct messages as well
 TIMEZONE = ZoneInfo("Europe/London")
+LOG_LEVEL = "INFO"              # DEBUG also logs every message that isn't a command
 
-def _load_api_key() -> str:
-    """Key lookup order:
-    1. METOFFICE_API_KEY environment variable
-    2. file named by METOFFICE_KEY_FILE
-    3. ~/.config/meshcore/metoffice_key
-    4. metoffice_key.txt next to this script
-    Quotes, spaces and Windows line endings are stripped.
-    """
-    def clean(v: str) -> str:
-        return v.strip().strip('"').strip("'").strip()
-
-    key = clean(os.environ.get("METOFFICE_API_KEY", ""))
-    if key:
-        return key
-    candidates = [
-        os.environ.get("METOFFICE_KEY_FILE", ""),
-        os.path.expanduser("~/.config/meshcore/metoffice_key"),
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), "metoffice_key.txt"),
-    ]
-    for path in candidates:
-        if path and os.path.isfile(path):
-            try:
-                with open(path, encoding="utf-8") as fh:
-                    key = clean(fh.read())
-                if key:
-                    return key
-            except OSError:
-                pass
-    return ""
-
-
-MET_OFFICE_API_KEY = _load_api_key()
-MET_OFFICE_BASE = "https://data.hub.api.metoffice.gov.uk/sitespecific/v0/point/"
-WX_CACHE_SEC = 1800             # reuse a forecast for 30 min (free tier: 360 calls/day)
+WX_CACHE_SEC = 1800             # reuse a forecast for 30 min
+WX_DAILY_CALL_BUDGET = 300      # Met Office calls per UTC day (free tier: 360)
 GEOCODE_CACHE_SEC = 86400
 HTTP_TIMEOUT = 20
 
@@ -123,6 +102,23 @@ RATE_LIMIT_NOTIFY = True            # tell a user once per window when they hit 
 MIN_TX_GAP_SEC = 3.0                # minimum seconds between any two radio sends
 ADMIN_PUBKEYS: set[str] = set()     # pubkey prefixes (12 hex chars) exempt from limits, DMs only
 
+# ---------- Fun commands ----------
+ROLL_MAX_DICE = 10
+ROLL_MAX_SIDES = 1000
+EIGHTBALL_ANSWERS = [
+    # yes
+    "Yes, without a doubt.", "Signs point to yes.", "The mesh says yes.",
+    "Count on it.", "All nodes agree: yes.", "Looks good from here.",
+    "Yes, go for it.", "Strong signal on that one. Yes.",
+    # unsure
+    "Signal too weak. Ask again.", "Packet lost. Try later.",
+    "Too many hops to tell.", "The answer is still in flight.",
+    "Ask again after the next advert.",
+    # no
+    "No.", "Not a chance.", "The mesh says no.",
+    "Unlikely.", "All nodes disagree.", "Don't count on it.",
+]
+
 # ---------- Scheduled messages ----------
 # Each entry needs "text" and a target: "channel": <idx> or "dm": "<pubkey prefix>".
 # Timing, pick one:
@@ -144,6 +140,134 @@ SCHEDULE_TICK_SEC = 10
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 _LOGGER = logging.getLogger("meshpotato_bot")
+
+
+def _load_api_key() -> str:
+    """Key lookup order:
+    1. METOFFICE_API_KEY environment variable
+    2. file named by METOFFICE_KEY_FILE
+    3. ~/.config/meshcore/metoffice_key
+    4. metoffice_key.txt next to this script
+    Quotes, spaces and Windows line endings are stripped.
+    """
+    def clean(v: str) -> str:
+        return v.strip().strip('"').strip("'").strip()
+
+    key = clean(os.environ.get("METOFFICE_API_KEY", ""))
+    if key:
+        return key
+    candidates = [
+        os.environ.get("METOFFICE_KEY_FILE", ""),
+        os.path.expanduser("~/.config/meshcore/metoffice_key"),
+        os.path.join(SCRIPT_DIR, "metoffice_key.txt"),
+    ]
+    for path in candidates:
+        if path and os.path.isfile(path):
+            try:
+                with open(path, encoding="utf-8") as fh:
+                    key = clean(fh.read())
+                if key:
+                    return key
+            except OSError:
+                pass
+    return ""
+
+
+MET_OFFICE_API_KEY = _load_api_key()
+MET_OFFICE_BASE = "https://data.hub.api.metoffice.gov.uk/sitespecific/v0/point/"
+
+# =====================================================================
+# config.toml
+# =====================================================================
+CONFIG_FILE = os.path.join(SCRIPT_DIR, "config.toml")
+
+
+def _pair(v: Any) -> tuple[int, float]:
+    count, window = v
+    return int(count), float(window)
+
+
+def _log_level(v: Any) -> str:
+    level = str(v).upper()
+    if not isinstance(logging.getLevelName(level), int):
+        raise ValueError(f"unknown level {v!r}, use DEBUG, INFO, WARNING or ERROR")
+    return level
+
+
+# Settings that config.toml may set. A converter turns the TOML value into the
+# Python type; None means the value must match the type of the default.
+_CONFIG_SETTINGS: dict[str, Optional[Callable[[Any], Any]]] = {
+    "SERIAL_PORT": None,
+    "BAUDRATE": None,
+    "CHANNEL_IDXS": lambda v: [int(x) for x in v],
+    "ANSWER_DMS": None,
+    "TIMEZONE": ZoneInfo,
+    "LOG_LEVEL": _log_level,
+    "WX_CACHE_SEC": None,
+    "WX_DAILY_CALL_BUDGET": None,
+    "GEOCODE_CACHE_SEC": None,
+    "HTTP_TIMEOUT": None,
+    "DEFAULT_LOCATION": None,
+    "LOCATIONS": lambda d: {str(k): (float(v[0]), float(v[1])) for k, v in d.items()},
+    "MAX_REPLY_BYTES": None,
+    "USE_EMOJI": None,
+    "USE_MPH": None,
+    "WXH_HOURS": None,
+    "WXH_STEP_HOURS": None,
+    "WXH_MENTION_RESERVE": None,
+    "RATE_LIMIT_GLOBAL": _pair,
+    "RATE_LIMIT_PER_USER": _pair,
+    "RATE_LIMIT_PER_CHANNEL": _pair,
+    "RATE_LIMIT_NOTIFY": None,
+    "MIN_TX_GAP_SEC": float,
+    "ADMIN_PUBKEYS": lambda v: {str(k) for k in v},
+    "ROLL_MAX_DICE": None,
+    "ROLL_MAX_SIDES": None,
+    "EIGHTBALL_ANSWERS": lambda v: [str(a) for a in v],
+    "SCHEDULED_MESSAGES": lambda v: [dict(e) for e in v],
+    "SCHEDULE_GRACE_SEC": None,
+    "SCHEDULE_TICK_SEC": None,
+}
+
+
+def load_config(path: Optional[str] = None) -> Optional[str]:
+    """Override the settings above from a TOML file.
+    Uses `path`, else $MESHPOTATO_CONFIG, else config.toml next to this script.
+    Returns the file loaded, or None when there is no config file."""
+    explicit = path or os.environ.get("MESHPOTATO_CONFIG")
+    path = explicit or CONFIG_FILE
+    if not os.path.isfile(path):
+        if explicit:
+            raise SystemExit(f"Config file not found: {path}")
+        return None
+    if tomllib is None:
+        raise SystemExit(f"{path} needs Python 3.11 or newer (tomllib)")
+    try:
+        with open(path, "rb") as fh:
+            data = tomllib.load(fh)
+    except tomllib.TOMLDecodeError as ex:
+        raise SystemExit(f"Can't read {path}: {ex}")
+
+    g = globals()
+    for key, value in data.items():
+        name = key.upper()
+        if name not in _CONFIG_SETTINGS:
+            _LOGGER.warning("Unknown setting '%s' in %s ignored", key, path)
+            continue
+        convert = _CONFIG_SETTINGS[name]
+        try:
+            if convert:
+                value = convert(value)
+            elif type(value) is not type(g[name]):
+                raise TypeError(f"expected {type(g[name]).__name__}, got {type(value).__name__}")
+        except Exception as ex:
+            raise SystemExit(f"Bad value for '{key}' in {path}: {ex}")
+        g[name] = value
+
+    _wx_cache.ttl = WX_CACHE_SEC
+    _geo_cache.ttl = GEOCODE_CACHE_SEC
+    return path
+
 
 # =====================================================================
 # Path and signal info
@@ -354,6 +478,12 @@ class TTLCache:
     def put(self, key, value):
         self._data[key] = (time.monotonic(), value)
 
+    def cleanup(self) -> None:
+        now = time.monotonic()
+        for key, (stamp, _) in list(self._data.items()):
+            if now - stamp >= self.ttl:
+                self._data.pop(key, None)
+
 
 # =====================================================================
 # Geocoding (postcodes.io, free, UK only, no key)
@@ -366,18 +496,17 @@ _geo_cache = TTLCache(GEOCODE_CACHE_SEC)
 
 
 class LocationError(Exception):
-    pass
+    """The place can't be found. Commands stay quiet about these."""
 
 
 def _geocode_sync(query: str) -> tuple[float, float, str]:
-    q = query.strip()
+    q = query.strip() or DEFAULT_LOCATION
     key = q.lower()
 
-    if not q:
-        q = key = DEFAULT_LOCATION
-    named = {k.lower(): (k, v) for k, v in LOCATIONS.items()}
-    if key.lower() in named:
-        name, (lat, lon) = named[key.lower()]
+    named = {k.lower(): k for k in LOCATIONS}
+    if key in named:
+        name = named[key]
+        lat, lon = LOCATIONS[name]
         return lat, lon, name.title()
 
     m = LATLON_RE.match(q)
@@ -408,8 +537,6 @@ def _geocode_sync(query: str) -> tuple[float, float, str]:
                 raise LocationError(f"'{q}' not found")
             r = res[0]
             out = (r["latitude"], r["longitude"], r.get("name_1") or q.title())
-    except LocationError:
-        raise
     except urllib.error.HTTPError as ex:
         if ex.code == 404:
             raise LocationError(f"'{q}' not found")
@@ -446,8 +573,37 @@ WX_EMOJI = {
     28: "⛈️", 29: "⛈️", 30: "⛈️",
 }
 COMPASS = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
+MPH_PER_MS = 2.23694
+
+
+class QuotaError(Exception):
+    """The daily Met Office call budget is used up."""
+
+
+class CallBudget:
+    """Counts Met Office calls per UTC day. Thread safe, since fetches run in threads.
+    The count lives in memory, so a restart starts it again at 0."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._day = None
+        self.used = 0
+
+    def take(self) -> bool:
+        today = datetime.now(timezone.utc).date()
+        with self._lock:
+            if today != self._day:
+                self._day, self.used = today, 0
+            if self.used >= WX_DAILY_CALL_BUDGET:
+                return False
+            self.used += 1
+            return True
+
 
 _wx_cache = TTLCache(WX_CACHE_SEC)
+_wx_budget = CallBudget()
+_fetch_locks: dict[Any, threading.Lock] = defaultdict(threading.Lock)
+_fetch_locks_guard = threading.Lock()
 
 
 def _compass(deg: Optional[float]) -> str:
@@ -456,10 +612,17 @@ def _compass(deg: Optional[float]) -> str:
     return COMPASS[int((deg % 360) / 45 + 0.5) % 8]
 
 
+def _speed_value(ms: Optional[float]) -> str:
+    """Speed as a bare number in the configured unit."""
+    if ms is None:
+        return "?"
+    return f"{ms * MPH_PER_MS:.0f}" if USE_MPH else f"{ms:.0f}"
+
+
 def _speed(ms: Optional[float]) -> str:
     if ms is None:
         return "?"
-    return f"{ms * 2.23694:.0f}mph" if USE_MPH else f"{ms:.0f}m/s"
+    return _speed_value(ms) + ("mph" if USE_MPH else "m/s")
 
 
 def _parse_time(s: str) -> datetime:
@@ -470,18 +633,24 @@ def _fetch_metoffice_sync(kind: str, lat: float, lon: float) -> dict:
     if not MET_OFFICE_API_KEY:
         raise RuntimeError("METOFFICE_API_KEY not set")
     key = (kind, round(lat, 2), round(lon, 2))
-    cached = _wx_cache.get(key)
-    if cached:
-        return cached
-    params = urllib.parse.urlencode({
-        "latitude": f"{lat:.4f}",
-        "longitude": f"{lon:.4f}",
-        "excludeParameterMetadata": "true",
-        "includeLocationName": "true",
-    })
-    data = _http_get_json(f"{MET_OFFICE_BASE}{kind}?{params}", headers={"apikey": MET_OFFICE_API_KEY})
-    _wx_cache.put(key, data)
-    return data
+    with _fetch_locks_guard:
+        lock = _fetch_locks[key]
+    # One fetch per place at a time, so two quick requests share one API call
+    with lock:
+        cached = _wx_cache.get(key)
+        if cached:
+            return cached
+        if not _wx_budget.take():
+            raise QuotaError(f"{WX_DAILY_CALL_BUDGET} calls used today")
+        params = urllib.parse.urlencode({
+            "latitude": f"{lat:.4f}",
+            "longitude": f"{lon:.4f}",
+            "excludeParameterMetadata": "true",
+            "includeLocationName": "true",
+        })
+        data = _http_get_json(f"{MET_OFFICE_BASE}{kind}?{params}", headers={"apikey": MET_OFFICE_API_KEY})
+        _wx_cache.put(key, data)
+        return data
 
 
 def format_hourly(data: dict, label: str) -> str:
@@ -493,22 +662,22 @@ def format_hourly(data: dict, label: str) -> str:
     if not entry:
         return f"WX {label}: no data"
     t = _parse_time(entry["time"]).astimezone(TIMEZONE)
-    desc = WX_CODES.get(entry.get("significantWeatherCode"), "?")
+    code = entry.get("significantWeatherCode")
+    desc = WX_CODES.get(code, "?")
     temp = entry.get("screenTemperature")
     feels = entry.get("feelsLikeTemperature")
     rh = entry.get("screenRelativeHumidity")
     pop = entry.get("probOfPrecipitation")
-    code = entry.get("significantWeatherCode")
     wind = f"{_compass(entry.get('windDirectionFrom10m'))} {_speed(entry.get('windSpeed10m'))}"
-    gust = _speed(entry.get("windGustSpeed10m")).rstrip("mph/s")
+    gust = _speed_value(entry.get("windGustSpeed10m"))
     if USE_EMOJI:
         parts = [
             f"{WX_EMOJI.get(code, '')} {label} {t:%H:%M}",
             desc,
-            (f"\U0001F321\uFE0F{temp:.0f}\u00B0C" + (f" (feels {feels:.0f}\u00B0)" if feels is not None else ""))
+            (f"\U0001F321️{temp:.0f}°C" + (f" (feels {feels:.0f}°)" if feels is not None else ""))
             if temp is not None else "",
             f"\U0001F4A8{wind} gust {gust}",
-            f"\u2614{pop}%" if pop is not None else "",
+            f"☔{pop}%" if pop is not None else "",
             f"\U0001F4A7humidity {rh:.0f}%" if rh is not None else "",
         ]
         return " ".join(p for p in parts if p)
@@ -532,7 +701,8 @@ def format_daily(data: dict, label: str, days: int = 3) -> str:
         d = _parse_time(e["time"]).astimezone(TIMEZONE).date()
         if d < today:
             continue
-        desc = WX_CODES.get(e.get("daySignificantWeatherCode"), "?")
+        code = e.get("daySignificantWeatherCode")
+        desc = WX_CODES.get(code, "?")
         hi = e.get("dayMaxScreenTemperature")
         lo = e.get("nightMinScreenTemperature")
         pop = e.get("dayProbabilityOfPrecipitation")
@@ -540,8 +710,7 @@ def format_daily(data: dict, label: str, days: int = 3) -> str:
         lo_s = f"{lo:.0f}" if lo is not None else "?"
         pop_s = pop if pop is not None else "?"
         if USE_EMOJI:
-            code = e.get("daySignificantWeatherCode")
-            out.append(f"{d:%a} {WX_EMOJI.get(code, desc)} {hi_s}/{lo_s}\u00B0 \u2614{pop_s}%")
+            out.append(f"{d:%a} {WX_EMOJI.get(code, desc)} {hi_s}/{lo_s}° ☔{pop_s}%")
         else:
             out.append(f"{d:%a} {desc} {hi_s}/{lo_s}C {pop_s}%")
         if len(out) >= days:
@@ -553,9 +722,11 @@ def format_daily(data: dict, label: str, days: int = 3) -> str:
     return f"{label}: " + " | ".join(out)
 
 
-def format_hours(data: dict, label: str, hours: int = WXH_HOURS, step: int = WXH_STEP_HOURS,
+def format_hours(data: dict, label: str, hours: Optional[int] = None, step: Optional[int] = None,
                  budget: Optional[int] = None) -> str:
     """Hour-by-hour outlook. Adds entries until `hours` or the byte budget is reached."""
+    hours = WXH_HOURS if hours is None else hours
+    step = WXH_STEP_HOURS if step is None else step
     if budget is None:
         budget = MAX_REPLY_BYTES - WXH_MENTION_RESERVE
     props = data["features"][0]["properties"]
@@ -577,7 +748,7 @@ def format_hours(data: dict, label: str, hours: int = WXH_HOURS, step: int = WXH
         temp_s = f"{temp:.0f}" if temp is not None else "?"
         pop_s = pop if pop is not None else "?"
         if USE_EMOJI:
-            item = f"{t:%H}h {WX_EMOJI.get(code, '?')}{temp_s}\u00B0 \u2614{pop_s}%"
+            item = f"{t:%H}h {WX_EMOJI.get(code, '?')}{temp_s}° ☔{pop_s}%"
         else:
             item = f"{t:%H}h {WX_CODES.get(code, '?')} {temp_s}C {pop_s}%"
         candidate = text + (sep if count else "") + item
@@ -590,13 +761,23 @@ def format_hours(data: dict, label: str, hours: int = WXH_HOURS, step: int = WXH
     return text
 
 
-async def get_weather(query: str, daily: bool = False, mode: str = "",
-                      budget: Optional[int] = None, quiet: bool = False) -> Optional[str]:
-    """mode: "now" (default), "hours" or "daily". daily=True is the same as mode="daily".
-    quiet=True returns None instead of an error reply when the location isn't found."""
-    mode = mode or ("daily" if daily else "now")
+async def get_weather(query: str, mode: str = "now", budget: Optional[int] = None,
+                      quiet: bool = False) -> Optional[str]:
+    """mode: "now", "hours" or "daily".
+    quiet=True returns None instead of an error reply when the place isn't found."""
     try:
         lat, lon, label = await asyncio.to_thread(_geocode_sync, query)
+    except LocationError as ex:
+        _LOGGER.info("Location lookup failed for %r: %s", query, ex)
+        return None if quiet else f"WX: {ex}"
+    except urllib.error.HTTPError as ex:
+        _LOGGER.warning("postcodes.io HTTP %s for %r: %s", ex.code, query, ex.reason)
+        return "WX: place lookup error"
+    except Exception as ex:
+        _LOGGER.warning("Place lookup failed for %r: %s", query, ex)
+        return "WX: place lookup failed"
+
+    try:
         kind = "daily" if mode == "daily" else "hourly"
         data = await asyncio.to_thread(_fetch_metoffice_sync, kind, lat, lon)
         if mode == "daily":
@@ -604,9 +785,9 @@ async def get_weather(query: str, daily: bool = False, mode: str = "",
         if mode == "hours":
             return format_hours(data, label, budget=budget)
         return format_hourly(data, label)
-    except LocationError as ex:
-        _LOGGER.info("Location lookup failed for %r: %s", query, ex)
-        return None if quiet else f"WX: {ex}"
+    except QuotaError as ex:
+        _LOGGER.warning("Met Office daily budget reached: %s", ex)
+        return "WX: daily quota used, try tomorrow"
     except urllib.error.HTTPError as ex:
         _LOGGER.warning("Met Office HTTP %s: %s", ex.code, ex.reason)
         if ex.code in (401, 403):
@@ -615,20 +796,21 @@ async def get_weather(query: str, daily: bool = False, mode: str = "",
             return "WX: API quota hit, try later"
         return f"WX: service error {ex.code}"
     except Exception as ex:
-        _LOGGER.warning("Weather lookup failed: %s", ex)
+        _LOGGER.warning("Met Office lookup failed: %s", ex)
         return "WX: lookup failed"
 
 
 # =====================================================================
 # Text helpers
 # =====================================================================
-def trim(text: str, limit: int = MAX_REPLY_BYTES) -> str:
+def trim(text: str, limit: Optional[int] = None) -> str:
     """Collapse whitespace and cut to `limit` UTF-8 bytes without splitting a character."""
+    limit = MAX_REPLY_BYTES if limit is None else limit
     text = " ".join(text.split())
     if len(text.encode("utf-8")) <= limit:
         return text
     out = text.encode("utf-8")[: limit - 1].decode("utf-8", "ignore")
-    out = out.rstrip("\uFE0F\u200D ")  # drop a dangling emoji modifier
+    out = out.rstrip("️‍ ")  # drop a dangling emoji modifier
     return out + "~"
 
 
@@ -814,28 +996,11 @@ async def scheduler(sender: Sender, entries: list[dict]) -> None:
 # =====================================================================
 HELP_TEXT = ("Cmds: ping, test, !wx/!wxh/!wxf [place] (now/hours/3 days), "
              "!roll [2d6], !flipacoin, !eightball <question>, !help")
-KNOWN_COMMANDS = PLAIN_COMMANDS | {"!" + c for c in BANG_COMMANDS}
 WX_MODES = {"!wx": "now", "!wxh": "hours", "!wxf": "daily"}
 
 # ---------- Fun commands ----------
 _rng = random.SystemRandom()
-ROLL_MAX_DICE = 10
-ROLL_MAX_SIDES = 1000
 ROLL_RE = re.compile(r"^(\d*)d(\d+)([+-]\d+)?$")
-
-EIGHTBALL_ANSWERS = [
-    # yes
-    "Yes, without a doubt.", "Signs point to yes.", "The mesh says yes.",
-    "Count on it.", "All nodes agree: yes.", "Looks good from here.",
-    "Yes, go for it.", "Strong signal on that one. Yes.",
-    # unsure
-    "Signal too weak. Ask again.", "Packet lost. Try later.",
-    "Too many hops to tell.", "The answer is still in flight.",
-    "Ask again after the next advert.",
-    # no
-    "No.", "Not a chance.", "The mesh says no.",
-    "Unlikely.", "All nodes disagree.", "Don't count on it.",
-]
 
 
 def roll_dice(arg: str) -> str:
@@ -898,12 +1063,10 @@ async def run_command(cmd: str, arg: str, sender_name: str, rx_info: dict[str, A
 # Main
 # =====================================================================
 async def main(port: str) -> None:
-    global latest_pathinfo_str
-
     if not MET_OFFICE_API_KEY:
         _LOGGER.warning("Met Office API key not found (env METOFFICE_API_KEY, "
                         "~/.config/meshcore/metoffice_key or metoffice_key.txt). "
-                        "wx/wxh/wxf will reply with an error.")
+                        "!wx/!wxh/!wxf will reply with an error.")
     else:
         _LOGGER.info("Met Office API key loaded (%d chars)", len(MET_OFFICE_API_KEY))
 
@@ -916,21 +1079,30 @@ async def main(port: str) -> None:
     limiter = RateLimiter()
     sender = Sender(meshcore)
     schedule = validate_schedule(SCHEDULED_MESSAGES)
+    admin_prefixes = {k.strip().lower()[:12] for k in ADMIN_PUBKEYS}
+    running: set[asyncio.Task] = set()      # keeps command tasks alive until they finish
 
     await meshcore.start_auto_message_fetching()
 
     async def handle_rx_log_data(event):
-        global latest_pathinfo_str
-        raw = (event.payload or {}).get("payload")
-        if raw:
-            parsed = parse_rx_log_data(raw)
-            if parsed:
-                latest_pathinfo_str = format_pathinfo(parsed)
+        parsed = parse_rx_log_data(event.payload or {})
+        if parsed:
+            latest_rx.clear()
+            latest_rx.update(parsed, at=time.monotonic())
 
-    async def dispatch(cmd, arg, sender_name, user_key, chan_key, reply):
-        if cmd not in KNOWN_COMMANDS:
+    async def respond(cmd, arg, sender_name, rx_info, reply):
+        try:
+            text = await run_command(cmd, arg, sender_name, rx_info)
+        except Exception:
+            _LOGGER.exception("Command %s failed", cmd)
             return
-        if user_key not in ADMIN_PUBKEYS:
+        if text:
+            reply(text)
+
+    def dispatch(cmd, arg, sender_name, user_key, chan_key, reply, rx_info, admin=False):
+        if not cmd:
+            return
+        if not admin:
             ok, bucket, retry = limiter.check(user_key, chan_key)
             if not ok:
                 _LOGGER.info("Rate limited (%s) %s on %s, retry %ss", bucket, user_key, chan_key, retry)
@@ -938,9 +1110,10 @@ async def main(port: str) -> None:
                     who = f"@[{sender_name}] " if sender_name else ""
                     reply(f"{who}Slow down, try again in {retry}s")
                 return
-        text = await run_command(cmd, arg, sender_name)
-        if text:
-            reply(text)
+        # Run in the background so a slow weather lookup doesn't hold up other messages
+        task = asyncio.create_task(respond(cmd, arg, sender_name, rx_info, reply), name=f"cmd {cmd}")
+        running.add(task)
+        task.add_done_callback(running.discard)
 
     async def handle_channel_message(event):
         msg = event.payload or {}
@@ -951,23 +1124,27 @@ async def main(port: str) -> None:
         if self_name and sender_name == self_name:
             return
         cmd, arg = parse_command(body)
-        _LOGGER.info("RX ch%s %s: %s", chan, sender_name, body)
-        await dispatch(cmd, arg, sender_name,
-                       user_key=f"name:{sender_name.lower()}",
-                       chan_key=f"ch:{chan}",
-                       reply=lambda t: sender.channel(chan, t))
+        _LOGGER.log(logging.INFO if cmd else logging.DEBUG, "RX ch%s %s: %s", chan, sender_name, body)
+        dispatch(cmd, arg, sender_name,
+                 user_key=f"name:{sender_name.lower()}",
+                 chan_key=f"ch:{chan}",
+                 reply=lambda t: sender.channel(chan, t),
+                 rx_info=message_rx_info(msg))
 
     async def handle_contact_message(event):
         msg = event.payload or {}
         prefix = msg.get("pubkey_prefix", "")
         if not prefix:
             return
-        cmd, arg = parse_command(msg.get("text", ""))
-        _LOGGER.info("RX dm %s: %s", prefix, msg.get("text", ""))
-        await dispatch(cmd, arg, "",
-                       user_key=prefix,
-                       chan_key="dm",
-                       reply=lambda t: sender.dm(prefix, t))
+        text = msg.get("text", "")
+        cmd, arg = parse_command(text)
+        _LOGGER.log(logging.INFO if cmd else logging.DEBUG, "RX dm %s: %s", prefix, text)
+        dispatch(cmd, arg, "",
+                 user_key=prefix,
+                 chan_key="dm",
+                 reply=lambda t: sender.dm(prefix, t),
+                 rx_info=message_rx_info(msg),
+                 admin=prefix.lower() in admin_prefixes)
 
     subs = [
         meshcore.subscribe(EventType.CHANNEL_MSG_RECV, handle_channel_message),
@@ -980,6 +1157,8 @@ async def main(port: str) -> None:
         while True:
             await asyncio.sleep(300)
             limiter.cleanup()
+            _wx_cache.cleanup()
+            _geo_cache.cleanup()
 
     tasks = [
         asyncio.create_task(sender.run(), name="sender"),
@@ -991,7 +1170,7 @@ async def main(port: str) -> None:
     try:
         await asyncio.gather(*tasks)
     finally:
-        for t in tasks:
+        for t in tasks + list(running):
             t.cancel()
         for s in subs:
             meshcore.unsubscribe(s)
@@ -1002,19 +1181,25 @@ async def main(port: str) -> None:
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="MeshCore MeshPotato bot")
-    ap.add_argument("--port", default=SERIAL_PORT, help="serial port, e.g. COM4 or /dev/ttyUSB0")
-    ap.add_argument("--wx", metavar="LOCATION", help="print a wx reply and exit (no radio)")
-    ap.add_argument("--wxh", metavar="LOCATION", help="print a wxh reply and exit (no radio)")
-    ap.add_argument("--wxf", metavar="LOCATION", help="print a wxf reply and exit (no radio)")
+    ap.add_argument("--port", help=f"serial port, e.g. COM4 or /dev/ttyUSB0 (default {SERIAL_PORT})")
+    ap.add_argument("--config", metavar="FILE", help="settings file (default config.toml next to this script)")
+    ap.add_argument("--wx", metavar="LOCATION", help="print a !wx reply and exit (no radio)")
+    ap.add_argument("--wxh", metavar="LOCATION", help="print a !wxh reply and exit (no radio)")
+    ap.add_argument("--wxf", metavar="LOCATION", help="print a !wxf reply and exit (no radio)")
     args = ap.parse_args()
+
+    loaded = load_config(args.config)
+    logging.getLogger().setLevel(LOG_LEVEL)
+    if loaded:
+        _LOGGER.info("Settings loaded from %s", loaded)
     try:
         if args.wx is not None:
-            print(trim(asyncio.run(get_weather(args.wx))))
+            print(trim(asyncio.run(get_weather(args.wx)) or ""))
         elif args.wxh is not None:
-            print(trim(asyncio.run(get_weather(args.wxh, mode="hours"))))
+            print(trim(asyncio.run(get_weather(args.wxh, mode="hours")) or ""))
         elif args.wxf is not None:
-            print(trim(asyncio.run(get_weather(args.wxf, daily=True))))
+            print(trim(asyncio.run(get_weather(args.wxf, mode="daily")) or ""))
         else:
-            asyncio.run(main(args.port))
+            asyncio.run(main(args.port or SERIAL_PORT))
     except KeyboardInterrupt:
         print("Stopped")

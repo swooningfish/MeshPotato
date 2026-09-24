@@ -1,0 +1,65 @@
+# MeshPotato settings
+#
+# Copy this file to config.toml next to run_bot.py and change what you need:
+#   cp config.example.toml config.toml
+#
+# config.toml is ignored by git, so `git pull` never clashes with your edits.
+# Any setting left out keeps the default in run_bot.py. Needs Python 3.11 or newer.
+
+# ---------- Radio ----------
+# serial_port = "/dev/ttyACM0"      # --port on the command line wins over this
+# channel_idxs = [1, 3]             # channels the bot listens and replies on
+# answer_dms = true
+# timezone = "Europe/London"
+# log_level = "INFO"                # DEBUG also logs messages that aren't commands
+
+# ---------- Weather ----------
+# default_location = "Norwich"
+# wx_cache_sec = 1800               # reuse a forecast for 30 min
+# wx_daily_call_budget = 300        # Met Office calls per UTC day (free tier: 360)
+# use_emoji = true
+# use_mph = true
+# wxh_hours = 6
+# wxh_step_hours = 1
+
+# Named places for !wx <name>. This replaces the built-in list.
+# [locations]
+# Norwich = [52.6278, 1.2983]
+# Cambridge = [52.205276, 0.119167]
+# Ipswich = [52.0592, 1.1555]
+
+# ---------- Rate limits: [max commands, seconds] ----------
+# rate_limit_per_user = [3, 60]
+# rate_limit_per_channel = [8, 60]
+# rate_limit_global = [20, 60]
+# rate_limit_notify = true
+# min_tx_gap_sec = 3.0
+# admin_pubkeys = ["a1b2c3d4e5f6"]  # 12-hex-character key prefixes, DMs only
+
+# ---------- Fun commands ----------
+# roll_max_dice = 10
+# roll_max_sides = 1000
+
+# ---------- Scheduled messages ----------
+# Any [[scheduled_messages]] entry replaces the whole built-in list.
+#
+# [[scheduled_messages]]
+# name = "morning-wx"
+# time = "07:30"
+# days = ["mon", "tue", "wed", "thu", "fri"]
+# channel = 1
+# text = "Morning WX {wx}"
+#
+# [[scheduled_messages]]
+# name = "weekend-fcst"
+# time = "08:30"
+# days = ["sat", "sun"]
+# channel = 1
+# text = "{wxf}"
+#
+# [[scheduled_messages]]
+# name = "beacon"
+# every_minutes = 360
+# start = "00:00"
+# channel = 3
+# text = "WX bot online {time}. Send !help for commands."

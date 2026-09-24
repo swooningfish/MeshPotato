@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# Install the MeshCore Meshpotato bot as a systemd service (Arch Linux / Arch Linux ARM / Raspberry Pi).
+# Install the MeshCore MeshPotato bot as a systemd service (Arch Linux / Arch Linux ARM / Raspberry Pi).
 #
 # Usage (run as your normal user, not root; it asks for sudo when needed):
 #   ./install_mesh_potato_bot_service.sh                         # defaults below
 #   ./install_mesh_potato_bot_service.sh --script run_bot.py --port /dev/ttyACM0
+#   ./install_mesh_potato_bot_service.sh --python ~/meshbot/bin/python
 #   ./install_mesh_potato_bot_service.sh --uninstall
 #
 # After install:
@@ -17,14 +18,22 @@ PORT=""
 PYTHON="$(command -v python3 || true)"
 UNINSTALL=0
 
+# Stop with a clear message when an option is missing its value
+need_value() {
+    if [[ $# -lt 2 || -z "$2" || "$2" == --* ]]; then
+        echo "$1 needs a value" >&2
+        exit 1
+    fi
+}
+
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --script)    SCRIPT="$2"; shift 2 ;;
-        --port)      PORT="$2"; shift 2 ;;
-        --python)    PYTHON="$2"; shift 2 ;;
-        --name)      SERVICE_NAME="$2"; shift 2 ;;
+        --script)    need_value "$@"; SCRIPT="$2"; shift 2 ;;
+        --port)      need_value "$@"; PORT="$2"; shift 2 ;;
+        --python)    need_value "$@"; PYTHON="$2"; shift 2 ;;
+        --name)      need_value "$@"; SERVICE_NAME="$2"; shift 2 ;;
         --uninstall) UNINSTALL=1; shift ;;
-        -h|--help)   sed -n '2,11p' "$0"; exit 0 ;;
+        -h|--help)   sed -n '2,12p' "$0"; exit 0 ;;
         *) echo "Unknown option: $1" >&2; exit 1 ;;
     esac
 done
@@ -58,7 +67,12 @@ WORK_DIR="$(dirname "$SCRIPT_PATH")"
 
 # ---------- checks ----------
 [[ -f "$SCRIPT_PATH" ]] || { echo "Script not found: $SCRIPT_PATH" >&2; exit 1; }
-[[ -x "$PYTHON" ]] || { echo "python3 not found. Install it: sudo pacman -S python" >&2; exit 1; }
+# Accept a bare name such as "python3" as well as a full path
+PYTHON_PATH="$(command -v "$PYTHON" 2>/dev/null || true)"
+[[ -n "$PYTHON_PATH" && -x "$PYTHON_PATH" ]] || { echo "Python not found: ${PYTHON:-python3}. Install it: sudo pacman -S python" >&2; exit 1; }
+PYTHON="$PYTHON_PATH"
+# systemd needs an absolute path. -s keeps venv symlinks as they are.
+[[ "$PYTHON" == /* ]] || PYTHON="$(realpath -s "$PYTHON")"
 
 if ! "$PYTHON" -c "import meshcore" 2>/dev/null; then
     echo "The meshcore package is not importable by $PYTHON." >&2
@@ -85,12 +99,12 @@ if [[ ! -s "$KEY_FILE" ]]; then
         echo "Saved METOFFICE_API_KEY to $KEY_FILE"
     else
         echo "WARNING: no API key in $KEY_FILE and METOFFICE_API_KEY is not set."
-        echo "         wx/wxf will fail until you create that file."
+        echo "         !wx/!wxh/!wxf will fail until you create that file."
     fi
 fi
 
 # Prefer a stable /dev/serial/by-id path if one exists and no port was given
-PORT_ARG=""
+EXEC_START="\"${PYTHON}\" \"${SCRIPT_PATH}\""
 if [[ -z "$PORT" ]]; then
     BYID="$(ls /dev/serial/by-id/* 2>/dev/null | head -n1 || true)"
     if [[ -n "$BYID" ]]; then
@@ -98,7 +112,7 @@ if [[ -z "$PORT" ]]; then
         echo "Using serial port $PORT"
     fi
 fi
-[[ -n "$PORT" ]] && PORT_ARG=" --port ${PORT}"
+[[ -n "$PORT" ]] && EXEC_START+=" --port \"${PORT}\""
 
 # ---------- write unit ----------
 TMP_UNIT="$(mktemp)"
@@ -117,7 +131,7 @@ SupplementaryGroups=${SERIAL_GROUP}
 WorkingDirectory=${WORK_DIR}
 Environment=HOME=${RUN_HOME}
 Environment=PYTHONUNBUFFERED=1
-ExecStart=${PYTHON} ${SCRIPT_PATH}${PORT_ARG}
+ExecStart=${EXEC_START}
 Restart=always
 RestartSec=15
 KillSignal=SIGINT
@@ -146,7 +160,7 @@ sudo systemctl enable --now "${SERVICE_NAME}"
 
 echo
 echo "Installed ${UNIT_PATH}"
-echo "  ExecStart: ${PYTHON} ${SCRIPT_PATH}${PORT_ARG}"
+echo "  ExecStart: ${EXEC_START}"
 echo
 echo "Status:   sudo systemctl status ${SERVICE_NAME}"
 echo "Logs:     journalctl -u ${SERVICE_NAME} -f"
