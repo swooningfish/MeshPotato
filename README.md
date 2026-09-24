@@ -668,3 +668,7 @@ sudo timedatectl set-ntp true
 - Built on the `https://github.com/meshcore-dev/meshcore_py` examples `serial_pingbot.py` and `serial_rss_bot.py`
 - Weather: Met Office Weather DataHub, Site Specific API
 - Geocoding: postcodes.io
+
+## License
+
+MIT, see [LICENSE](LICENSE).
