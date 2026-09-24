@@ -13,8 +13,11 @@ Commands (channel or direct message):
   !warn [location]   -> Met Office weather warnings for the region
   !sun [location]    -> Sunrise, sunset and hours of daylight today
   !moon              -> Moon phase, % lit and the next full and new moon
-  !stats             -> Commands served, messages heard, Met Office calls used
-  !uptime            -> How long the bot (and the computer) has been up
+  !stats             -> Commands served, messages heard, Met Office calls used (admin DMs only)
+  !uptime            -> How long the bot (and the computer) has been up (admin DMs only)
+  !mute <minutes>    -> Stop replies and scheduled messages for a while (admin DMs only)
+  !unmute            -> End a mute early (admin DMs only)
+  !say <ch> <text>   -> Post text to a channel as the bot (admin DMs only)
   !help              -> Command list                       (the ! is required)
   !roll [NdS+M]      -> Roll dice: !roll, !roll d20, !roll 2d6+3
   !flipacoin         -> Heads or tails
@@ -110,7 +113,9 @@ RATE_LIMIT_PER_USER = (3, 60)       # per pubkey (DM) or per sender name (channe
 RATE_LIMIT_PER_CHANNEL = (8, 60)    # per channel index ("dm" bucket for DMs)
 RATE_LIMIT_NOTIFY = True            # tell a user once per window when they hit a limit
 MIN_TX_GAP_SEC = 3.0                # minimum seconds between any two radio sends
-ADMIN_PUBKEYS: set[str] = set()     # pubkey prefixes (12 hex chars) exempt from limits, DMs only
+MUTE_MAX_MINUTES = 1440             # longest !mute (24 hours)
+ADMIN_PUBKEYS: set[str] = set()     # pubkey prefixes (12 hex chars) exempt from limits and
+                                    # allowed the admin commands, DMs only
 
 # ---------- Fun commands ----------
 ROLL_MAX_DICE = 10
@@ -239,6 +244,7 @@ _CONFIG_SETTINGS: dict[str, Optional[Callable[[Any], Any]]] = {
     "RATE_LIMIT_NOTIFY": None,
     "MIN_TX_GAP_SEC": float,
     "ADMIN_PUBKEYS": lambda v: {str(k) for k in v},
+    "MUTE_MAX_MINUTES": None,
     "ROLL_MAX_DICE": None,
     "ROLL_MAX_SIDES": None,
     "EIGHTBALL_ANSWERS": lambda v: [str(a) for a in v],
@@ -1175,7 +1181,7 @@ def split_sender(text: str) -> tuple[str, str]:
 PLAIN_COMMANDS = {"ping", "test"}
 # Commands that only work with a leading "!" (returned as "!name")
 BANG_COMMANDS = {"help", "roll", "flipacoin", "eightball", "wx", "wxh", "wxf",
-                 "warn", "sun", "moon", "stats", "uptime"}
+                 "warn", "sun", "moon", "stats", "uptime", "mute", "unmute", "say"}
 COMMAND_ALIASES = {"8ball": "eightball", "flip": "flipacoin", "coin": "flipacoin", "dice": "roll",
                    "warnings": "warn", "sunrise": "sun", "sunset": "sun"}
 
@@ -1237,6 +1243,7 @@ class Stats:
 
 _stats = Stats()
 _radio: Optional[MeshCore] = None   # set in main() so !stats can ask for the battery level
+_tx: Optional["Sender"] = None      # set in main() so !say can queue a channel message
 
 
 def _duration(seconds: float) -> str:
@@ -1425,6 +1432,9 @@ async def scheduler(sender: Sender, entries: list[dict]) -> None:
             if not slot or fired.get(i) == slot:
                 continue
             fired[i] = slot
+            if mute_remaining() > 0:
+                _LOGGER.info("Schedule '%s' skipped, bot is muted (%s)", entry.get("name", i), slot)
+                continue
             _LOGGER.info("Schedule '%s' firing (%s)", entry.get("name", i), slot)
             text = await expand_tokens(entry["text"])
             if "channel" in entry:
@@ -1438,7 +1448,69 @@ async def scheduler(sender: Sender, entries: list[dict]) -> None:
 # Command handling
 # =====================================================================
 HELP_TEXT = ("Cmds: ping, test, !wx/!wxh/!wxf [place], !warn [place], !sun [place], !moon, "
-             "!roll [2d6], !flip, !8ball <q>, !stats, !uptime, !help")
+             "!roll [2d6], !flip, !8ball <q>, !help")
+# Only answered in a DM from a key in ADMIN_PUBKEYS. Channel messages carry no key,
+# so these are never answered in a channel.
+ADMIN_COMMANDS = {"!stats", "!uptime", "!mute", "!unmute", "!say"}
+
+
+def command_allowed(cmd: str, admin: bool) -> bool:
+    return admin or cmd not in ADMIN_COMMANDS
+
+
+# ---------- Admin commands ----------
+_muted_until = 0.0              # time.monotonic() when a !mute ends
+
+
+def mute_remaining() -> float:
+    """Seconds of mute left, 0 when not muted."""
+    return max(0.0, _muted_until - time.monotonic())
+
+
+def _mute_end_text(seconds: float) -> str:
+    return f"{datetime.now(TIMEZONE) + timedelta(seconds=seconds):%H:%M}"
+
+
+def mute(arg: str) -> str:
+    """!mute <minutes> starts or replaces a mute, !mute 0 ends it, !mute alone shows the state."""
+    global _muted_until
+    on, off = ("🔇 ", "🔊 ") if USE_EMOJI else ("", "")
+    arg = arg.strip()
+    if not arg:
+        left = mute_remaining()
+        if not left:
+            return f"{off}Not muted"
+        return f"{on}Muted, {_duration(left)} left (until {_mute_end_text(left)})"
+    if not arg.isdigit() or int(arg) > MUTE_MAX_MINUTES:
+        return f"Use !mute <minutes> (1-{MUTE_MAX_MINUTES}), !mute 0 or !unmute to end"
+    minutes = int(arg)
+    if minutes == 0:
+        return unmute()
+    _muted_until = time.monotonic() + minutes * 60
+    _LOGGER.info("Muted for %d minutes", minutes)
+    return f"{on}Muted for {_duration(minutes * 60)}, until {_mute_end_text(minutes * 60)}"
+
+
+def unmute() -> str:
+    global _muted_until
+    was_muted = mute_remaining() > 0
+    _muted_until = 0.0
+    if was_muted:
+        _LOGGER.info("Unmuted")
+    return ("🔊 " if USE_EMOJI else "") + ("Unmuted" if was_muted else "Not muted")
+
+
+def say(arg: str) -> str:
+    """!say <ch> <text> queues text for a channel slot. Works while muted."""
+    parts = arg.split(None, 1)
+    if len(parts) < 2 or not parts[0].isdigit():
+        return "Use !say <ch> <text>, e.g. !say 1 Net starts 20:00"
+    if _tx is None:
+        return "Radio not ready"
+    ch = int(parts[0])
+    _tx.channel(ch, parts[1])
+    _LOGGER.info("Admin !say queued for ch%s", ch)
+    return ("📢 " if USE_EMOJI else "") + f"Queued for ch{ch}"
 WX_MODES = {"!wx": "now", "!wxh": "hours", "!wxf": "daily"}
 
 # ---------- Fun commands ----------
@@ -1508,6 +1580,12 @@ async def run_command(cmd: str, arg: str, sender_name: str, rx_info: dict[str, A
         return mention + format_stats(await _battery_mv(), budget=budget)
     if cmd == "!uptime":
         return mention + format_uptime()
+    if cmd == "!mute":
+        return mention + mute(arg)
+    if cmd == "!unmute":
+        return mention + unmute()
+    if cmd == "!say":
+        return mention + say(arg)
     if cmd in WX_MODES:
         text = await get_weather(arg, mode=WX_MODES[cmd], budget=budget, quiet=True)
         return mention + text if text else None
@@ -1518,7 +1596,7 @@ async def run_command(cmd: str, arg: str, sender_name: str, rx_info: dict[str, A
 # Main
 # =====================================================================
 async def main(port: str) -> None:
-    global _radio
+    global _radio, _tx
     if not MET_OFFICE_API_KEY:
         _LOGGER.warning("Met Office API key not found (env METOFFICE_API_KEY, metoffice_api_key "
                         "in config.toml, ~/.config/meshcore/metoffice_key or metoffice_key.txt). "
@@ -1536,6 +1614,7 @@ async def main(port: str) -> None:
     self_name = (meshcore.self_info or {}).get("name", "")
     limiter = RateLimiter()
     sender = Sender(meshcore)
+    _tx = sender
     schedule = validate_schedule(SCHEDULED_MESSAGES)
     admin_prefixes = {k.strip().lower()[:12] for k in ADMIN_PUBKEYS}
     running: set[asyncio.Task] = set()      # keeps command tasks alive until they finish
@@ -1559,6 +1638,12 @@ async def main(port: str) -> None:
 
     def dispatch(cmd, arg, sender_name, user_key, chan_key, reply, rx_info, admin=False):
         if not cmd:
+            return
+        if not command_allowed(cmd, admin):
+            _LOGGER.info("Ignored admin command %s from %s", cmd, user_key)
+            return
+        if not admin and mute_remaining() > 0:
+            _LOGGER.info("Muted, ignoring %s from %s", cmd, user_key)
             return
         if not admin:
             ok, bucket, retry = limiter.check(user_key, chan_key)

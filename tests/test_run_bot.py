@@ -37,6 +37,8 @@ import run_bot as bot
     ("moon", ("", "")),
     ("!stats", ("!stats", "")),
     ("!uptime", ("!uptime", "")),
+    ("!mute 30", ("!mute", "30")),
+    ("!say 1 Net starts 20:00", ("!say", "1 Net starts 20:00")),
     ("!nothing", ("", "")),
     ("", ("", "")),
 ])
@@ -428,6 +430,69 @@ def test_format_stats(monkeypatch):
     assert bot.format_stats(budget=70).startswith("📊 Cmds 10 (wx 5) |")   # list shortened to fit
     short = bot.format_stats(budget=60)
     assert len(short.encode("utf-8")) <= 60 and "(" not in short
+
+
+def test_stats_and_uptime_are_admin_only():
+    for cmd in ("!stats", "!uptime", "!mute", "!unmute", "!say"):
+        assert not bot.command_allowed(cmd, admin=False)
+        assert bot.command_allowed(cmd, admin=True)
+    assert bot.command_allowed("!wx", admin=False)
+    assert "!stats" not in bot.HELP_TEXT and "!uptime" not in bot.HELP_TEXT
+
+
+def test_mute_and_unmute(monkeypatch):
+    monkeypatch.setattr(bot, "_muted_until", 0.0)
+    assert bot.mute("") == "🔊 Not muted"
+    assert bot.mute("30").startswith("🔇 Muted for 30m, until ")
+    assert 29 * 60 < bot.mute_remaining() <= 30 * 60
+    status = bot.mute("")
+    assert status.startswith(("🔇 Muted, 29m left", "🔇 Muted, 30m left")) and "(until " in status
+    assert bot.unmute() == "🔊 Unmuted"
+    assert bot.mute_remaining() == 0
+    bot.mute("90")
+    assert bot.mute("0") == "🔊 Unmuted"
+
+
+@pytest.mark.parametrize("arg", ["abc", "-5", "1441", "1.5"])
+def test_mute_rejects_bad_minutes(monkeypatch, arg):
+    monkeypatch.setattr(bot, "_muted_until", 0.0)
+    assert bot.mute(arg).startswith("Use !mute")
+    assert bot.mute_remaining() == 0
+
+
+def test_muted_schedule_is_skipped(monkeypatch):
+    sent = []
+    fake = type("FakeSender", (), {"channel": lambda self, ch, t: sent.append((ch, t)),
+                                   "dm": lambda self, k, t: sent.append((k, t))})()
+    monkeypatch.setattr(bot, "_muted_until", time.monotonic() + 600)
+    monkeypatch.setattr(bot, "due_slot", lambda entry, now: "slot-1")
+
+    async def run_once():
+        task = asyncio.create_task(bot.scheduler(fake, [{"name": "x", "time": "07:30", "channel": 1, "text": "hi"}]))
+        await asyncio.sleep(0.05)
+        task.cancel()
+    asyncio.run(run_once())
+    assert sent == []
+
+
+def test_say(monkeypatch):
+    sent = []
+    fake = type("FakeSender", (), {"channel": lambda self, ch, t: sent.append((ch, t))})()
+    monkeypatch.setattr(bot, "_tx", fake)
+    assert bot.say("1 Net starts 20:00") == "📢 Queued for ch1"
+    assert sent == [(1, "Net starts 20:00")]
+    assert bot.say("1").startswith("Use !say")
+    assert bot.say("one hello").startswith("Use !say")
+    assert len(sent) == 1
+
+
+def test_say_works_while_muted(monkeypatch):
+    sent = []
+    fake = type("FakeSender", (), {"channel": lambda self, ch, t: sent.append((ch, t))})()
+    monkeypatch.setattr(bot, "_tx", fake)
+    monkeypatch.setattr(bot, "_muted_until", time.monotonic() + 600)
+    assert asyncio.run(bot.run_command("!say", "3 Hello", "", {})) == "📢 Queued for ch3"
+    assert sent == [(3, "Hello")]
 
 
 def test_uptime_reply(monkeypatch):

@@ -43,7 +43,9 @@
 # rate_limit_global = [20, 60]
 # rate_limit_notify = true
 # min_tx_gap_sec = 3.0
-# admin_pubkeys = ["a1b2c3d4e5f6"]  # 12-hex-character key prefixes, DMs only
+# admin_pubkeys = ["a1b2c3d4e5f6"]  # 12-hex-character key prefixes, DMs only.
+#                                   # Skip the limits and can use !stats, !uptime, !mute, !say
+# mute_max_minutes = 1440           # longest !mute
 
 # ---------- Fun commands ----------
 # roll_max_dice = 10

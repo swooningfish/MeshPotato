@@ -1,6 +1,6 @@
 # MeshPotato 🥔: MeshCore WX, Ping, Bot
 
-A MeshCore chat bot for a Raspberry Pi running Arch Linux ARM. It answers ping and test commands, posts Met Office weather and weather warnings, gives sunrise, sunset and moon phase, reports its own stats, rate limits spam and sends scheduled messages. It runs as a systemd service and starts on boot.
+A MeshCore chat bot for a Raspberry Pi running Arch Linux ARM. It answers ping and test commands, posts Met Office weather and weather warnings, gives sunrise, sunset and moon phase, reports its own stats to admins, lets admins mute it or post as it, rate limits spam and sends scheduled messages. It runs as a systemd service and starts on boot.
 
 Files in this repo:
 
@@ -64,10 +64,16 @@ If the location can't be found, the bot doesn't reply. The failed lookup is stil
 
 Short aliases: `!warnings` = `!warn`, `!sunrise` and `!sunset` = `!sun`.
 
-#### Bot status (`!` required)
+#### Admin commands (`!` required, admins only)
+
+These only work in a direct message from a key in `ADMIN_PUBKEYS`. Anyone else, and any channel message, gets no reply. They aren't listed in `!help`.
 
 | Command | Reply |
 |---------|-------|
+| `!mute <minutes>` | Stops all replies and scheduled messages for 1 to 1440 minutes: `🔇 Muted for 30m, until 20:30` |
+| `!mute` | Shows whether the bot is muted and for how long |
+| `!mute 0` / `!unmute` | Ends the mute early |
+| `!say <ch> <text>` | Posts the text to a channel slot as the bot: `!say 1 Net starts 20:00` |
 | `!stats` | Commands served, messages heard and sent, rate limited commands, Met Office calls used today, radio battery |
 | `!uptime` | How long the bot has been running, and how long the Pi has been up |
 
@@ -209,7 +215,20 @@ The moon emoji matches the phase as seen from the UK:
 
 New moon, first quarter, full moon and last quarter are shown for about a day either side of the exact time. The in-between phases fill the days between. Full and new moon dates are accurate to within an hour, so a phase that falls just before or after midnight can show the wrong day.
 
+### Mute and say (!mute, !say)
+
+`!mute` is for quieting the bot during a net or an event. While muted, the bot:
+
+- ignores every command from everyone except admin DMs, with no reply and no "slow down" notices
+- skips scheduled messages that fall due. They aren't sent later when the mute ends
+
+Admin DMs still work while muted, so you can check or end the mute and use `!say`. A new `!mute` replaces the old one. The mute is kept in memory, so restarting the bot ends it. Set the longest mute with `mute_max_minutes`.
+
+`!say` posts to any channel slot, not only the ones in `CHANNEL_IDXS`. The text is cut to `MAX_REPLY_BYTES`. The reply `📢 Queued for ch1` means the message is in the send queue. If the radio then refuses it, for example because the slot has no channel, the failure is only logged.
+
 ### Stats and uptime (!stats, !uptime)
+
+Send these to the bot as a direct message from an admin key (see `ADMIN_PUBKEYS` under Rate limiting). The bot can't tell who sent a channel message, so it ignores them in channels, even from an admin.
 
 ```
 📊 Cmds 42 (wx 20, ping 12, test 5) | Heard 310 | Sent 45 | Limited 3 | WX API 18/300 | 🔋4.02V
@@ -239,7 +258,7 @@ Every command is checked against three limits. A command only runs and counts wh
 
 A user who hits their limit gets one notice per window: `Slow down, try again in 42s`. Other limits drop the command without a reply. Radio sends are queued with at least 3 seconds between them.
 
-Public keys in `ADMIN_PUBKEYS` skip all limits, **in direct messages only**. Channel messages carry only the sender's display name, not their key, so the bot can't tell an admin apart in a channel, and admins get the normal limits there. Keys are matched on their first 12 hex characters, ignoring case, so a full key works too.
+Public keys in `ADMIN_PUBKEYS` skip all limits and can use the admin commands (`!stats`, `!uptime`, `!mute`, `!unmute`, `!say`), **in direct messages only**. Channel messages carry only the sender's display name, not their key, so the bot can't tell an admin apart in a channel, and admins get the normal limits there. Keys are matched on their first 12 hex characters, ignoring case, so a full key works too.
 
 Because channel users are tracked by name, someone who changes their name gets a fresh per-user allowance. The per-channel and global limits still apply.
 
@@ -420,7 +439,8 @@ The bot reads `config.toml` from the folder `run_bot.py` is in. To use another f
 | `rate_limit_global` | `[20, 60]` | |
 | `rate_limit_notify` | `true` | Send one "slow down" notice |
 | `min_tx_gap_sec` | `3.0` | Gap between radio sends |
-| `admin_pubkeys` | `["a1b2c3d4e5f6"]` | 12-hex-character key prefixes that skip limits in DMs |
+| `admin_pubkeys` | `["a1b2c3d4e5f6"]` | 12-hex-character key prefixes that skip limits and can use the admin commands in DMs |
+| `mute_max_minutes` | `1440` | Longest `!mute` |
 
 ### Scheduled messages
 
