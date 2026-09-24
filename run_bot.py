@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """
 MeshPotato bot (serial companion radio) for use on MeshCore
 
