@@ -367,18 +367,24 @@ def test_parse_hamqsl():
 
 def test_format_hf(monkeypatch):
     data = bot.parse_hamqsl(HAMQSL_XML)
-    assert bot.format_hf(data, day=True) == ("📻 HF day: 80-40m Fair | 30-20m Good | 17-15m Fair | "
+    assert bot.format_hf(data, day=True) == \
+        "📻 HF day: 80-40m🟡 30-20m🟢 17-15m🟡 12-10m🔴 | ☀️SFI 112 🧲K2 A19 | 🔊S1-S2 | N0NBH"
+    assert bot.format_hf(data, day=False, budget=100) == \
+        "📻 HF night: 80-40m🟢 30-20m🟢 17-15m🟡 12-10m🔴 | ☀️SFI 112 🧲K2 A19 | N0NBH"     # noise dropped
+    monkeypatch.setattr(bot, "USE_EMOJI", False)
+    assert bot.format_hf(data, day=True) == ("HF day: 80-40m Fair | 30-20m Good | 17-15m Fair | "
                                              "12-10m Poor | SFI 112 K2 A19 | Noise S1-S2 | N0NBH")
-    assert bot.format_hf(data, day=False, budget=100) == ("📻 HF night: 80-40m Good | 30-20m Good | "
-                                                          "17-15m Fair | 12-10m Poor | SFI 112 K2 A19 | N0NBH")
 
 
-def test_format_vhf():
+def test_format_vhf(monkeypatch):
     data = bot.parse_hamqsl(HAMQSL_XML)
     assert bot.format_vhf(data, "Normal") == \
-        "📡 VHF: 6m Es 50MHz ES | 4m Es Closed | 2m Es Closed | Aurora Closed | Tropo Normal | N0NBH, Open-Meteo"
-    assert bot.format_vhf(data, "Normal", budget=90) == \
-        "📡 VHF: 6m Es 50MHz ES | 4m Es Closed | 2m Es Closed | Aurora Closed | N0NBH"
+        "📡 VHF: 6m Es🟢 50MHz ES 4m Es🔴 2m Es🔴 Aurora🔴 | Tropo ➖Normal | N0NBH, Open-Meteo"
+    assert bot.format_vhf(data, "Normal", budget=80) == "📡 VHF: 6m Es🟢 50MHz ES 4m Es🔴 2m Es🔴 Aurora🔴 | N0NBH"
+    assert bot.format_vhf(data, None) == "📡 VHF: 6m Es🟢 50MHz ES 4m Es🔴 2m Es🔴 Aurora🔴 | N0NBH"
+    monkeypatch.setattr(bot, "USE_EMOJI", False)
+    assert bot.format_vhf(data, "Normal") == \
+        "VHF: 6m Es 50MHz ES | 4m Es Closed | 2m Es Closed | Aurora Closed | Tropo Normal | N0NBH, Open-Meteo"
 
 
 def test_is_daytime(monkeypatch):
@@ -418,7 +424,7 @@ def test_tropo_outlook_finds_inversion():
     assert outlook["best_at"] == datetime(2026, 9, 24, 6)
     assert outlook["best"] < outlook["now"]
     text = bot.format_uhf(outlook, "Norwich")
-    assert text.startswith("📶 Norwich UHF tropo: ") and "24h best" in text and "Thu 06h" in text
+    assert text.startswith("📶 Norwich UHF tropo: 🔼Slightly enhanced now") and "24h best ⏫Enhanced Thu 06h" in text
     assert bot.format_uhf(None, "Norwich") == "📶 Norwich UHF tropo: no forecast data | Open-Meteo"
 
 

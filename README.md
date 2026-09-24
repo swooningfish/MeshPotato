@@ -343,11 +343,21 @@ Both accept the same `<location>` forms as `!wx`. Add `{aq}`, `{aq:place}`, `{po
 ### Radio conditions (!hf, !vhf, !uhf)
 
 ```
-📻 HF night: 80-40m Good | 30-20m Good | 17-15m Fair | 12-10m Poor | SFI 112 K2 A19 | Noise S1-S2 | N0NBH
-📡 VHF: 6m Es Closed | 4m Es Closed | 2m Es Closed | Aurora Closed | Tropo Normal | N0NBH, Open-Meteo
-📶 Norwich UHF tropo: Normal now (-38 N/km) | next 24h similar | Open-Meteo
-📶 Norwich UHF tropo: Slightly enhanced now (-65 N/km) | 24h best Enhanced Thu 06h (-89) | Open-Meteo
+📻 HF night: 80-40m🟢 30-20m🟢 17-15m🟡 12-10m🔴 | ☀️SFI 112 🧲K2 A19 | 🔊S1-S2 | N0NBH
+📡 VHF: 6m Es🟢 50MHz ES 4m Es🔴 2m Es🔴 Aurora🔴 | Tropo ➖Normal | N0NBH, Open-Meteo
+📶 Norwich UHF tropo: ➖Normal now (-38 N/km) | next 24h similar | Open-Meteo
+📶 Norwich UHF tropo: 🔼Slightly enhanced now (-65 N/km) | 24h best ⏫Enhanced Thu 06h (-89) | Open-Meteo
 ```
+
+| Emoji | Meaning |
+|-------|---------|
+| 🟢 🟡 🔴 | HF band Good, Fair, Poor. VHF: 🟢 open (with what N0NBH reports), 🔴 closed |
+| ☀️ SFI | Solar flux index |
+| 🧲 K / A | Geomagnetic K and A index |
+| 🔊 | Expected noise level |
+| 🔽 ➖ 🔼 ⏫ 🚀 | Tropo below normal, normal, slightly enhanced, enhanced, ducting likely |
+
+With `use_emoji = false`, the reports use words instead: `80-40m Good | 30-20m Good | ...`, `6m Es Closed | ...`, `Tropo Normal`.
 
 **HF and VHF** come from the solar data feed by Paul, N0NBH, at [hamqsl.com](https://www.hamqsl.com/solar.html). It is free, and the author asks for credit and for no more than one fetch an hour, since that's how often the solar flux updates. The rest of the feed updates every 3 hours. The bot caches it for an hour (`HF_CACHE_SEC`) and never less, even if `config.toml` sets a lower value. One fetch serves both `!hf` and `!vhf`.
 
@@ -374,11 +384,11 @@ A normal atmosphere is about -40 N/km. More negative means signals bend further 
 
 | Gradient (N/km) | Level | Meaning |
 |-----------------|-------|---------|
-| above 0 | Below normal | Signals bend up, range shorter than usual |
-| 0 to -60 | Normal | Standard atmosphere |
-| -60 to -79 | Slightly enhanced | Some extra range |
-| -79 to -157 | Enhanced | Super-refraction (ITU-R), clearly longer paths |
-| below -157 | Ducting likely | Ducting (ITU-R), paths of hundreds of km possible |
+| above 0 | 🔽 Below normal | Signals bend up, range shorter than usual |
+| 0 to -60 | ➖ Normal | Standard atmosphere |
+| -60 to -79 | 🔼 Slightly enhanced | Some extra range |
+| -79 to -157 | ⏫ Enhanced | Super-refraction (ITU-R), clearly longer paths |
+| below -157 | 🚀 Ducting likely | Ducting (ITU-R), paths of hundreds of km possible |
 
 The -79 and -157 limits are the ITU-R ones. -60 is the bot's own early hint. The 700 m layer averages out thin inversions, so real ducting near the ground can be stronger than the figure suggests. Treat the level as a guide, not a measurement. Ducting is most likely on calm nights and mornings under high pressure, and over the sea.
 

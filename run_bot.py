@@ -1554,6 +1554,9 @@ TROPO_FIELDS = ["temperature_2m", "relative_humidity_2m", "surface_pressure",
 # because the surface-to-925 hPa layer (about 700 m) smooths out thin inversions.
 TROPO_LEVELS = [(0, "Below normal"), (-60, "Normal"), (-79, "Slightly enhanced"),
                 (-157, "Enhanced"), (float("-inf"), "Ducting likely")]
+BAND_EMOJI = {"good": "🟢", "fair": "🟡", "poor": "🔴"}
+TROPO_EMOJI = {"Below normal": "🔽", "Normal": "➖", "Slightly enhanced": "🔼", "Enhanced": "⏫",
+               "Ducting likely": "🚀"}
 
 _hamqsl_cache = TTLCache(max(HAMQSL_MIN_CACHE_SEC, HF_CACHE_SEC))
 _tropo_cache = TTLCache(TROPO_CACHE_SEC)
@@ -1593,15 +1596,23 @@ def is_daytime(lat: float, lon: float, now: Optional[datetime] = None) -> bool:
 
 
 def format_hf(data: dict, day: bool, budget: Optional[int] = None) -> str:
-    """'📻 HF day: 80-40m Fair | 30-20m Good | 17-15m Fair | 12-10m Poor | SFI 112 K2 A19 | N0NBH'."""
+    """'📻 HF day: 80-40m🟡 30-20m🟢 17-15m🟡 12-10m🔴 | ☀️SFI 112 🧲K2 A19 | 🔊S1-S2 | N0NBH'.
+    Plain text: '80-40m Fair | 30-20m Good | ...'."""
     budget = MAX_REPLY_BYTES if budget is None else budget
     when = "day" if day else "night"
-    bands = " | ".join(f"{label} {data['hf'].get((name, when)) or '?'}" for name, label in HF_BANDS)
-    head = f"📻 HF {when}: " if USE_EMOJI else f"HF {when}: "
-    indices = f"SFI {data['sfi'] or '?'} K{data['k'] or '?'} A{data['a'] or '?'}"
-    text = f"{head}{bands} | {indices} | {HAMQSL_CREDIT}"
+    states = [(label, data["hf"].get((name, when)) or "?") for name, label in HF_BANDS]
+    sfi, k, a = data["sfi"] or "?", data["k"] or "?", data["a"] or "?"
     noise = data.get("noise")
-    with_noise = f"{head}{bands} | {indices} | Noise {noise} | {HAMQSL_CREDIT}"
+    if USE_EMOJI:
+        head = f"📻 HF {when}: "
+        bands = " ".join(f"{label}{BAND_EMOJI.get(s.lower(), '❔')}" for label, s in states)
+        indices, noise_text = f"☀️SFI {sfi} 🧲K{k} A{a}", f"🔊{noise}"
+    else:
+        head = f"HF {when}: "
+        bands = " | ".join(f"{label} {s}" for label, s in states)
+        indices, noise_text = f"SFI {sfi} K{k} A{a}", f"Noise {noise}"
+    text = f"{head}{bands} | {indices} | {HAMQSL_CREDIT}"
+    with_noise = f"{head}{bands} | {indices} | {noise_text} | {HAMQSL_CREDIT}"
     if noise and len(with_noise.encode("utf-8")) <= budget:
         return with_noise
     return text
@@ -1666,32 +1677,42 @@ def tropo_outlook(data: dict, now: Optional[datetime] = None) -> Optional[dict]:
 
 
 def format_uhf(outlook: Optional[dict], label: str) -> str:
-    """'📶 Norwich UHF tropo: Normal now (-42 N/km) | 24h best Enhanced Fri 03h (-95) | Open-Meteo'."""
+    """'📶 Norwich UHF tropo: ➖Normal now (-42 N/km) | 24h best ⏫Enhanced Fri 03h (-95) | Open-Meteo'."""
     head = f"📶 {label} UHF tropo: " if USE_EMOJI else f"{label} UHF tropo: "
     if not outlook:
         return f"{head}no forecast data | {AIR_CREDIT}"
     now_level, best_level = tropo_level(outlook["now"]), tropo_level(outlook["best"])
-    text = f"{head}{now_level} now ({outlook['now']:.0f} N/km)"
+
+    def shown(level: str) -> str:
+        return TROPO_EMOJI.get(level, "") + level if USE_EMOJI else level
+    text = f"{head}{shown(now_level)} now ({outlook['now']:.0f} N/km)"
     if best_level != now_level:
-        text += f" | 24h best {best_level} {outlook['best_at']:%a %Hh} ({outlook['best']:.0f})"
+        text += f" | 24h best {shown(best_level)} {outlook['best_at']:%a %Hh} ({outlook['best']:.0f})"
     else:
         text += " | next 24h similar"
     return f"{text} | {AIR_CREDIT}"
 
 
 def format_vhf(data: dict, tropo: Optional[str], budget: Optional[int] = None) -> str:
-    """'📡 VHF: 6m Es Closed | 4m Es Closed | 2m Es Closed | Aurora Closed | Tropo Normal | N0NBH, Open-Meteo'."""
+    """'📡 VHF: 6m Es🔴 4m Es🔴 2m Es🟢 144MHz ES Aurora🔴 | Tropo ➖Normal | N0NBH, Open-Meteo'.
+    Closed shows 🔴, open shows 🟢 and what N0NBH reports. Plain text keeps the words."""
     budget = MAX_REPLY_BYTES if budget is None else budget
     items = []
     for key, label in VHF_PHENOMENA:
-        state = data["vhf"].get(key) or "?"
-        items.append(f"{label} {state.replace('Band ', '')}")
+        state = (data["vhf"].get(key) or "?").replace("Band ", "")
+        if not USE_EMOJI:
+            items.append(f"{label} {state}")
+        elif state.lower() == "closed":
+            items.append(f"{label}🔴")
+        else:
+            items.append(f"{label}🟢 {state}" if state != "?" else f"{label}❔")
+    sep = " " if USE_EMOJI else " | "
     head = "📡 VHF: " if USE_EMOJI else "VHF: "
     credit = HAMQSL_CREDIT + (f", {AIR_CREDIT}" if tropo else "")
-    parts = items + ([f"Tropo {tropo}"] if tropo else [])
-    text = f"{head}{' | '.join(parts)} | {credit}"
-    if len(text.encode("utf-8")) > budget and tropo:      # keep the N0NBH data, drop the tropo hint
-        text = f"{head}{' | '.join(items)} | {HAMQSL_CREDIT}"
+    tropo_text = f"Tropo {TROPO_EMOJI.get(tropo, '')}{tropo}" if USE_EMOJI else f"Tropo {tropo}"
+    text = f"{head}{sep.join(items)} | {tropo_text} | {credit}" if tropo else ""
+    if not text or len(text.encode("utf-8")) > budget:   # keep the N0NBH data, drop the tropo hint
+        text = f"{head}{sep.join(items)} | {HAMQSL_CREDIT}"
     return text
 
 
