@@ -221,8 +221,10 @@ def test_help_fits_one_message():
 
 
 # ---------- commands ----------
-def test_ping_shows_only_hops():
+def test_ping_shows_only_hops(monkeypatch):
     info = {"path_len": 2, "path_nodes": ["a1", "b2"], "snr": 7.5, "rssi": -85}
+    assert asyncio.run(bot.run_command("ping", "", "Alice", info)) == "@[Alice] 🏓 Pong (2 hops)"
+    monkeypatch.setattr(bot, "USE_EMOJI", False)
     assert asyncio.run(bot.run_command("ping", "", "Alice", info)) == "@[Alice] Pong (2 hops)"
 
 

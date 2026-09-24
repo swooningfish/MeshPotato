@@ -1713,7 +1713,7 @@ async def run_command(cmd: str, arg: str, sender_name: str, rx_info: dict[str, A
     """target is where the reply goes, ("chan", idx) or ("dm", pubkey prefix). !warn watches it."""
     mention = f"@[{sender_name}] " if sender_name else ""
     if cmd == "ping":
-        return f"{mention}Pong {format_hops(rx_info)}"
+        return f"{mention}{'🏓 ' if USE_EMOJI else ''}Pong {format_hops(rx_info)}"
     if cmd == "test":
         return f"{mention}Test OK {format_rx_report(rx_info)}"
     if cmd == "!path":
