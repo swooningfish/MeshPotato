@@ -1,4 +1,4 @@
-# Mesh Potato: MeshCore WX and Ping Bot
+# MeshPotato 🥔: MeshCore WX, Ping, Bot
 
 A MeshCore chat bot for a Raspberry Pi running Arch Linux ARM. It answers ping and test commands, posts Met Office weather, rate limits spam and sends scheduled messages. It runs as a systemd service and starts on boot.
 
