@@ -458,6 +458,7 @@ Timing:
 | `time` | `"07:30"` | Every day at 07:30 |
 | `time` + `days` | `"07:30"`, `["mon", "fri"]` | Those days only |
 | `at` | `"2026-12-25 09:00"` | Once |
+| `at` (no year) | `"12-25 09:00"` | Every year on that date |
 | `every_minutes` | `360`, `start = "00:00"` | 00:00, 06:00, 12:00, 18:00 |
 
 Tokens filled in at send time:
@@ -507,7 +508,7 @@ text = "WX bot online {time}. Send !help for commands."
 
 [[scheduled_messages]]
 name = "xmas"
-at = "2026-12-25 09:00"
+at = "12-25 09:00"
 channel = 1
 text = "Merry Christmas."
 ```

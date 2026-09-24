@@ -140,6 +140,7 @@ EIGHTBALL_ANSWERS = [
 #   "time": "HH:MM"                 daily, local TIMEZONE
 #       optional "days": ["mon", "tue", ...]
 #   "at": "YYYY-MM-DD HH:MM"        one-shot local timestamp
+#   "at": "MM-DD HH:MM"             same date every year
 #   "every_minutes": N              repeating interval, optional "start": "HH:MM"
 # Text tokens: {time} {date} {wx} {wx:place} {wxh} {wxh:place} {wxf} {wxf:place}
 #              {warn} {warn:place} {sun} {sun:place} {moon}
@@ -148,7 +149,7 @@ SCHEDULED_MESSAGES: list[dict[str, Any]] = [
      "channel": 1, "text": "Morning WX {wx}"},
     {"name": "weekend-fcst", "time": "08:30", "days": ["sat", "sun"],
      "channel": 1, "text": "{wxf}"},
-    {"name": "xmas", "at": "2026-12-25 09:00",
+    {"name": "xmas", "at": "12-25 09:00",
      "channel": 1, "text": "Merry Christmas."},
 ]
 SCHEDULE_GRACE_SEC = 120        # fire a slot up to this long after its due time
@@ -1365,13 +1366,26 @@ def _hm(s: str) -> tuple[int, int]:
     return int(h), int(m)
 
 
+def _at_is_yearly(at: str) -> bool:
+    """"MM-DD HH:MM" (no year) repeats every year."""
+    return at.strip().split()[0].count("-") == 1
+
+
+def _parse_at(at: str, year: int) -> datetime:
+    at = at.strip()
+    return datetime.strptime(f"{year}-{at}" if _at_is_yearly(at) else at, "%Y-%m-%d %H:%M")
+
+
 def due_slot(entry: dict, now: datetime) -> Optional[str]:
     """Return a unique slot id if the entry is due now, else None."""
     grace = timedelta(seconds=SCHEDULE_GRACE_SEC)
 
     if "at" in entry:
-        target = datetime.strptime(entry["at"], "%Y-%m-%d %H:%M").replace(tzinfo=TIMEZONE)
-        return f"at:{entry['at']}" if target <= now < target + grace else None
+        try:
+            target = _parse_at(entry["at"], now.year).replace(tzinfo=TIMEZONE)
+        except ValueError:      # "02-29" outside a leap year
+            return None
+        return f"at:{target:%Y-%m-%d %H:%M}" if target <= now < target + grace else None
 
     if "time" in entry:
         days = [d.lower()[:3] for d in entry.get("days", DAY_NAMES)]
@@ -1402,7 +1416,7 @@ def validate_schedule(entries: list[dict]) -> list[dict]:
             if "text" not in e or ("channel" not in e and "dm" not in e):
                 raise ValueError("needs 'text' and 'channel' or 'dm'")
             if "at" in e:
-                datetime.strptime(e["at"], "%Y-%m-%d %H:%M")
+                _parse_at(e["at"], 2000)     # leap year, so "02-29" is accepted
             elif "time" in e:
                 h, m = _hm(e["time"])
                 if not (0 <= h < 24 and 0 <= m < 60):

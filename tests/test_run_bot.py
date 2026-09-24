@@ -283,15 +283,33 @@ def test_due_slot_every_minutes():
     assert bot.due_slot(entry, now + timedelta(minutes=30)) is None
 
 
+def test_due_slot_at_once():
+    entry = {"at": "2026-12-25 09:00"}
+    assert bot.due_slot(entry, datetime(2026, 12, 25, 9, 1, tzinfo=bot.TIMEZONE)) == "at:2026-12-25 09:00"
+    assert bot.due_slot(entry, datetime(2027, 12, 25, 9, 1, tzinfo=bot.TIMEZONE)) is None
+
+
+def test_due_slot_at_yearly():
+    entry = {"at": "12-25 09:00"}
+    assert bot.due_slot(entry, datetime(2026, 12, 25, 9, 1, tzinfo=bot.TIMEZONE)) == "at:2026-12-25 09:00"
+    assert bot.due_slot(entry, datetime(2027, 12, 25, 9, 1, tzinfo=bot.TIMEZONE)) == "at:2027-12-25 09:00"
+    assert bot.due_slot(entry, datetime(2026, 12, 24, 9, 1, tzinfo=bot.TIMEZONE)) is None
+    leap = {"at": "02-29 09:00"}
+    assert bot.due_slot(leap, datetime(2027, 3, 1, 9, 1, tzinfo=bot.TIMEZONE)) is None
+    assert bot.due_slot(leap, datetime(2028, 2, 29, 9, 1, tzinfo=bot.TIMEZONE)) == "at:2028-02-29 09:00"
+
+
 def test_validate_schedule_drops_bad_entries():
     entries = [
         {"name": "ok", "time": "07:30", "channel": 1, "text": "hi"},
+        {"name": "yearly", "at": "12-25 09:00", "channel": 1, "text": "hi"},
+        {"name": "bad-at", "at": "13-25 09:00", "channel": 1, "text": "hi"},
         {"name": "no-target", "time": "07:30", "text": "hi"},
         {"name": "bad-time", "time": "25:00", "channel": 1, "text": "hi"},
         {"name": "too-often", "every_minutes": 1, "channel": 1, "text": "hi"},
         {"name": "bad-day", "time": "07:30", "days": ["funday"], "channel": 1, "text": "hi"},
     ]
-    assert [e["name"] for e in bot.validate_schedule(entries)] == ["ok"]
+    assert [e["name"] for e in bot.validate_schedule(entries)] == ["ok", "yearly"]
 
 
 # ---------- weather warnings ----------
