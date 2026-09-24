@@ -4,20 +4,21 @@ MeshPotato bot (serial companion radio) for use on MeshCore
 Built on the patterns in meshcore_py/examples/serial_pingbot.py and meshcore_py/examples/serial_rss_bot.py.
 
 Commands (channel or direct message):
-  ping | test        -> Pong with hop count and path       (a leading ! is optional)
-  wx [location]      -> Current conditions from Met Office DataHub (hourly)
-  wxh [location]     -> Next few hours, hour by hour (hourly)
-  wxf [location]     -> 3-day forecast from Met Office DataHub (daily)
+  ping               -> Pong with hop count         (whole message, a leading ! is optional)
+  test               -> Test OK with hops, path, SNR and RSSI (same rules as ping)
+  !wx [location]     -> Current conditions from Met Office DataHub (hourly)
+  !wxh [location]    -> Next few hours, hour by hour (hourly)
+  !wxf [location]    -> 3-day forecast from Met Office DataHub (daily)
   !help              -> Command list                       (the ! is required)
   !roll [NdS+M]      -> Roll dice: !roll, !roll d20, !roll 2d6+3
   !flipacoin         -> Heads or tails
   !eightball <q>     -> Ask the eight ball a yes/no question
 
 [location] accepts:
-  - a name from LOCATIONS below        (wx home)
-  - a UK postcode or outward code      (wx LS1 4AP, wx LS1)
-  - a UK place name                    (wx Harrogate)
-  - decimal lat,lon                    (wx 53.80,-1.55)
+  - a name from LOCATIONS below        (!wx home)
+  - a UK postcode or outward code      (!wx LS1 4AP, !wx LS1)
+  - a UK place name                    (!wx Harrogate)
+  - decimal lat,lon                    (!wx 53.80,-1.55)
   - nothing                            (uses DEFAULT_LOCATION)
 
 Features:
@@ -58,8 +59,7 @@ from meshcore import MeshCore, EventType
 SERIAL_PORT = "/dev/ttyACM0"            # override with --port
 BAUDRATE = 115200
 
-#CHANNEL_IDXS = [1]              # channels the bot listens and replies on
-CHANNEL_IDXS = [1,3]              # channels the bot listens and replies on
+CHANNEL_IDXS = [1, 3]           # channels the bot listens and replies on
 
 ANSWER_DMS = True               # reply to direct messages as well
 TIMEZONE = ZoneInfo("Europe/London")
@@ -97,7 +97,7 @@ def _load_api_key() -> str:
 
 MET_OFFICE_API_KEY = _load_api_key()
 MET_OFFICE_BASE = "https://data.hub.api.metoffice.gov.uk/sitespecific/v0/point/"
-WX_CACHE_SEC = 1200              # reuse a forecast for 30 min (free tier: 360 calls/day)
+WX_CACHE_SEC = 1800             # reuse a forecast for 30 min (free tier: 360 calls/day)
 GEOCODE_CACHE_SEC = 86400
 HTTP_TIMEOUT = 20
 
@@ -121,7 +121,7 @@ RATE_LIMIT_PER_USER = (3, 60)       # per pubkey (DM) or per sender name (channe
 RATE_LIMIT_PER_CHANNEL = (8, 60)    # per channel index ("dm" bucket for DMs)
 RATE_LIMIT_NOTIFY = True            # tell a user once per window when they hit a limit
 MIN_TX_GAP_SEC = 3.0                # minimum seconds between any two radio sends
-ADMIN_PUBKEYS: set[str] = set()     # pubkey prefixes (12 hex chars) exempt from limits
+ADMIN_PUBKEYS: set[str] = set()     # pubkey prefixes (12 hex chars) exempt from limits, DMs only
 
 # ---------- Scheduled messages ----------
 # Each entry needs "text" and a target: "channel": <idx> or "dm": "<pubkey prefix>".
@@ -146,44 +146,110 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 _LOGGER = logging.getLogger("meshpotato_bot")
 
 # =====================================================================
-# Path info (from serial_pingbot.py)
+# Path and signal info
 # =====================================================================
-latest_pathinfo_str = "(? hops, ?)"
+RX_LOG_MAX_AGE_SEC = 5.0        # an RX log older than this can't be the packet that carried a message
+DIRECT_PATH_LEN = 0xFF          # path_len of a message that arrived by direct route
+
+# Last RX_LOG_DATA seen: path_len, path_nodes, snr, rssi and its monotonic time "at"
+latest_rx: dict[str, Any] = {}
+
+
+def _split_path(path_hex: str, hash_size: int) -> list[str]:
+    step = max(1, hash_size) * 2
+    return [path_hex[i:i + step] for i in range(0, len(path_hex), step)]
+
+
+def _parse_raw_packet(hex_str: str) -> dict[str, Any]:
+    """Read the path from a raw packet: header, [4 transport code bytes], path byte, path.
+    The path byte holds the hop count (low 6 bits) and hash size - 1 (top 2 bits)."""
+    try:
+        data = bytes.fromhex(re.sub(r"\s", "", hex_str))
+        i = 1
+        if data[0] & 0x03 in (0x00, 0x03):      # transport flood / transport direct
+            i += 4
+        path_byte = data[i]
+        hash_size = (path_byte >> 6) + 1
+        path_len = path_byte & 0x3F
+        path = data[i + 1:i + 1 + path_len * hash_size]
+        if len(path) < path_len * hash_size:
+            return {}
+        return {"path_len": path_len, "path_nodes": _split_path(path.hex(), hash_size)}
+    except (ValueError, IndexError):
+        return {}
 
 
 def parse_rx_log_data(payload: Any) -> dict[str, Any]:
-    result: dict[str, Any] = {}
-    try:
-        hex_str = payload.get("payload") if isinstance(payload, dict) else payload
-        if not hex_str:
-            return result
-        if isinstance(hex_str, bytes):
-            hex_str = hex_str.hex()
-        hex_str = re.sub(r"\s", "", str(hex_str).lower())
-        if len(hex_str) < 4:
-            return result
-        result["header"] = hex_str[0:2]
-        path_len = int(hex_str[2:4], 16)
-        result["path_len"] = path_len
-        path_end = 4 + path_len * 2
-        if len(hex_str) < path_end:
-            return {}
-        path_hex = hex_str[4:path_end]
-        result["path_nodes"] = [path_hex[i:i + 2] for i in range(0, len(path_hex), 2)]
-    except Exception as ex:
-        _LOGGER.debug("Error parsing RX_LOG data: %s", ex)
+    """Path and signal info from an RX_LOG_DATA payload.
+    Uses the fields meshcore has already parsed, else decodes the raw packet."""
+    if not isinstance(payload, dict):
         return {}
+    if payload.get("path_len") is not None:
+        result = {"path_len": payload["path_len"],
+                  "path_nodes": _split_path(payload.get("path") or "", payload.get("path_hash_size") or 1)}
+    else:
+        raw = payload.get("payload")
+        result = _parse_raw_packet(raw.hex() if isinstance(raw, bytes) else str(raw or ""))
+    for key in ("snr", "rssi"):
+        if payload.get(key) is not None:
+            result[key] = payload[key]
     return result
 
 
-def format_pathinfo(parsed: dict[str, Any]) -> str:
-    path_len = parsed.get("path_len")
-    nodes = parsed.get("path_nodes") or []
-    if path_len is None:
-        return "(? hops, ?)"
-    if path_len == 0:
-        return "(0 hops, direct)"
-    return f"({path_len} hops, {':'.join(nodes) if nodes else '?'})"
+def message_rx_info(msg: dict[str, Any]) -> dict[str, Any]:
+    """Path and signal info for a received message.
+    Fields on the message win. The last RX log only fills gaps when it is recent
+    and has the same hop count, so it is most likely the packet that carried it."""
+    info: dict[str, Any] = {}
+    path_len = msg.get("path_len")
+    hash_mode = msg.get("path_hash_mode") or 0
+    if path_len == DIRECT_PATH_LEN or (path_len == 0x3F and hash_mode == 3):
+        info["direct"] = True
+        path_len = None
+    rx = latest_rx if time.monotonic() - latest_rx.get("at", 0) <= RX_LOG_MAX_AGE_SEC else {}
+    if path_len is not None and rx.get("path_len") not in (None, path_len):
+        rx = {}
+    if not info:
+        info["path_len"] = path_len if path_len is not None else rx.get("path_len")
+        if msg.get("path"):
+            info["path_nodes"] = _split_path(msg["path"], hash_mode + 1)
+        elif rx.get("path_nodes"):
+            info["path_nodes"] = rx["path_nodes"]
+    info["snr"] = msg.get("SNR", rx.get("snr"))
+    info["rssi"] = msg.get("RSSI", rx.get("rssi"))
+    return info
+
+
+def _hops(n: int) -> str:
+    return f"{n} hop{'' if n == 1 else 's'}"
+
+
+def format_hops(info: dict[str, Any]) -> str:
+    """ping: '(2 hops)'."""
+    if info.get("direct"):
+        return "(direct route)"
+    n = info.get("path_len")
+    return f"({_hops(n)})" if n is not None else "(? hops)"
+
+
+def format_rx_report(info: dict[str, Any]) -> str:
+    """test: '(2 hops, a1:b2) SNR 7.5dB RSSI -85dBm'."""
+    n = info.get("path_len")
+    if info.get("direct"):
+        path = "(direct route)"
+    elif n is None:
+        path = "(? hops, ?)"
+    elif n == 0:
+        path = "(0 hops, direct)"
+    else:
+        nodes = info.get("path_nodes") or []
+        path = f"({_hops(n)}, {':'.join(nodes) if nodes else '?'})"
+    parts = [path]
+    if info.get("snr") is not None:
+        parts.append(f"SNR {info['snr']:g}dB")
+    if info.get("rssi") is not None:
+        parts.append(f"RSSI {info['rssi']}dBm")
+    return " ".join(parts)
 
 
 # =====================================================================
@@ -525,8 +591,9 @@ def format_hours(data: dict, label: str, hours: int = WXH_HOURS, step: int = WXH
 
 
 async def get_weather(query: str, daily: bool = False, mode: str = "",
-                      budget: Optional[int] = None) -> str:
-    """mode: "now" (default), "hours" or "daily". daily=True is the same as mode="daily"."""
+                      budget: Optional[int] = None, quiet: bool = False) -> Optional[str]:
+    """mode: "now" (default), "hours" or "daily". daily=True is the same as mode="daily".
+    quiet=True returns None instead of an error reply when the location isn't found."""
     mode = mode or ("daily" if daily else "now")
     try:
         lat, lon, label = await asyncio.to_thread(_geocode_sync, query)
@@ -538,7 +605,8 @@ async def get_weather(query: str, daily: bool = False, mode: str = "",
             return format_hours(data, label, budget=budget)
         return format_hourly(data, label)
     except LocationError as ex:
-        return f"WX: {ex}"
+        _LOGGER.info("Location lookup failed for %r: %s", query, ex)
+        return None if quiet else f"WX: {ex}"
     except urllib.error.HTTPError as ex:
         _LOGGER.warning("Met Office HTTP %s: %s", ex.code, ex.reason)
         if ex.code in (401, 403):
@@ -572,16 +640,17 @@ def split_sender(text: str) -> tuple[str, str]:
     return "", text.strip()
 
 
-# Commands that work with or without a leading "!"
-PLAIN_COMMANDS = {"ping", "test", "wx", "wxh", "wxf"}
+# Commands that work with or without a leading "!", but only as the whole message
+PLAIN_COMMANDS = {"ping", "test"}
 # Commands that only work with a leading "!" (returned as "!name")
-BANG_COMMANDS = {"help", "roll", "flipacoin", "eightball"}
+BANG_COMMANDS = {"help", "roll", "flipacoin", "eightball", "wx", "wxh", "wxf"}
 COMMAND_ALIASES = {"8ball": "eightball", "flip": "flipacoin", "coin": "flipacoin", "dice": "roll"}
 
 
 def parse_command(body: str) -> tuple[str, str]:
     """Return (cmd, arg). Bang commands come back as "!roll" etc.
-    Unknown commands, and bang commands sent without "!", return ("", "")."""
+    Unknown commands, bang commands sent without "!", and plain commands
+    with extra text ("ping me later") return ("", "")."""
     body = body.strip()
     body = re.sub(r"^@\[[^\]]*\]\s*", "", body)     # strip a leading @[mention]
     if not body:
@@ -593,7 +662,7 @@ def parse_command(body: str) -> tuple[str, str]:
     name = raw.lstrip("!/")
     name = COMMAND_ALIASES.get(name, name)
     if name in PLAIN_COMMANDS:
-        return name, arg
+        return (name, "") if not arg else ("", "")
     if name in BANG_COMMANDS and bang:
         return "!" + name, arg
     return "", ""
@@ -604,7 +673,7 @@ async def expand_tokens(text: str) -> str:
     text = text.replace("{time}", now.strftime("%H:%M")).replace("{date}", now.strftime("%a %d %b"))
     modes = {"wx": "now", "wxh": "hours", "wxf": "daily"}
     for m in list(re.finditer(r"\{(wx[hf]?)(?::([^}]*))?\}", text)):
-        replacement = await get_weather(m.group(2) or "", mode=modes[m.group(1)])
+        replacement = await get_weather(m.group(2) or "", mode=modes[m.group(1)]) or ""
         text = text.replace(m.group(0), replacement, 1)
     return text
 
@@ -743,9 +812,10 @@ async def scheduler(sender: Sender, entries: list[dict]) -> None:
 # =====================================================================
 # Command handling
 # =====================================================================
-HELP_TEXT = ("Cmds: ping, test, wx/wxh/wxf [place] (now/hours/3 days), "
+HELP_TEXT = ("Cmds: ping, test, !wx/!wxh/!wxf [place] (now/hours/3 days), "
              "!roll [2d6], !flipacoin, !eightball <question>, !help")
 KNOWN_COMMANDS = PLAIN_COMMANDS | {"!" + c for c in BANG_COMMANDS}
+WX_MODES = {"!wx": "now", "!wxh": "hours", "!wxf": "daily"}
 
 # ---------- Fun commands ----------
 _rng = random.SystemRandom()
@@ -803,12 +873,12 @@ def eightball(question: str) -> str:
     return icon + _rng.choice(EIGHTBALL_ANSWERS)
 
 
-async def run_command(cmd: str, arg: str, sender_name: str) -> Optional[str]:
+async def run_command(cmd: str, arg: str, sender_name: str, rx_info: dict[str, Any]) -> Optional[str]:
     mention = f"@[{sender_name}] " if sender_name else ""
     if cmd == "ping":
-        return f"{mention}Pong {latest_pathinfo_str}"
+        return f"{mention}Pong {format_hops(rx_info)}"
     if cmd == "test":
-        return f"{mention}Test OK {latest_pathinfo_str}"
+        return f"{mention}Test OK {format_rx_report(rx_info)}"
     if cmd == "!help":
         return HELP_TEXT
     if cmd == "!roll":
@@ -817,13 +887,10 @@ async def run_command(cmd: str, arg: str, sender_name: str) -> Optional[str]:
         return mention + flip_coin()
     if cmd == "!eightball":
         return mention + eightball(arg)
-    if cmd == "wx":
-        return mention + await get_weather(arg)
-    if cmd == "wxh":
+    if cmd in WX_MODES:
         budget = MAX_REPLY_BYTES - len(mention.encode("utf-8"))
-        return mention + await get_weather(arg, mode="hours", budget=budget)
-    if cmd == "wxf":
-        return mention + await get_weather(arg, daily=True)
+        text = await get_weather(arg, mode=WX_MODES[cmd], budget=budget, quiet=True)
+        return mention + text if text else None
     return None
 
 
