@@ -1,0 +1,33 @@
+# Secrets: Met Office API key read by run_bot.py
+metoffice_key.txt
+metoffice_key
+.env
+.env.*
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+venv/
+.venv/
+env/
+meshbot/
+
+# Logs and runtime files
+*.log
+*.pid
+nohup.out
+
+# Editors and OS
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
