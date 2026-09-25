@@ -155,8 +155,13 @@ def test_format_hops():
     assert bot.format_hops({}) == "(? hops)"
 
 
-def test_format_rx_report():
+def test_format_rx_report(monkeypatch):
     info = {"path_len": 2, "path_nodes": ["a1", "b2"], "snr": 7.5, "rssi": -85}
+    assert bot.format_rx_report(info) == "🐸 (2 hops) 〰️ SNR 7.5dB 📶 RSSI -85dBm"
+    assert bot.format_rx_report({"path_len": 1, "snr": 10.0}) == "🐸 (1 hop) 〰️ SNR 10dB"
+    assert bot.format_rx_report({"direct": True}) == "🐸 (direct route)"
+    assert bot.format_rx_report({}) == "🐸 (? hops)"
+    monkeypatch.setattr(bot, "USE_EMOJI", False)
     assert bot.format_rx_report(info) == "(2 hops) SNR 7.5dB RSSI -85dBm"
     assert bot.format_rx_report({"path_len": 0, "snr": 10.0}) == "(0 hops) SNR 10dB"
     assert bot.format_rx_report({}) == "(? hops)"
@@ -557,13 +562,16 @@ def test_test_shows_rx_report(monkeypatch):
     monkeypatch.setattr(bot, "DEFAULT_LOCATION", "Norwich")
     # Sender's position unknown: no distance
     assert asyncio.run(bot.run_command("test", "", "Bob", info, ("chan", 1))) == \
-        "@[Bob] RX in Norwich | (2 hops) SNR 7.5dB RSSI -85dBm"
+        "@[Bob] 📍 RX in Norwich | 🐸 (2 hops) 〰️ SNR 7.5dB 📶 RSSI -85dBm"
     # Sender advertises a position (Cromer), bot at Norwich
     monkeypatch.setattr(bot, "_radio", type("Radio", (), {"contacts": GPS_CONTACTS, "self_info": {}})())
     assert asyncio.run(bot.run_command("test", "", "Alice", info, ("chan", 1))) == \
-        "@[Alice] RX in Norwich | (2 hops) SNR 7.5dB RSSI -85dBm | 34km"
+        "@[Alice] 📍 RX in Norwich | 🐸 (2 hops) 〰️ SNR 7.5dB 📶 RSSI -85dBm | 📏 34km"
     assert asyncio.run(bot.run_command("test", "", "", info, ("dm", "d4dd00"))) == \
-        "RX in Norwich | (2 hops) SNR 7.5dB RSSI -85dBm | 34km"
+        "📍 RX in Norwich | 🐸 (2 hops) 〰️ SNR 7.5dB 📶 RSSI -85dBm | 📏 34km"
+    monkeypatch.setattr(bot, "USE_EMOJI", False)
+    assert asyncio.run(bot.run_command("test", "", "Alice", info, ("chan", 1))) == \
+        "@[Alice] RX in Norwich | (2 hops) SNR 7.5dB RSSI -85dBm | 34km"
     monkeypatch.setattr(bot, "DEFAULT_LOCATION", "")
     assert asyncio.run(bot.run_command("test", "", "", info)) == "Test OK | (2 hops) SNR 7.5dB RSSI -85dBm"
 
