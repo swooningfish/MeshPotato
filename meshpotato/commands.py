@@ -22,6 +22,7 @@ from .heard import format_status, format_who, Heard, heard_path
 from .mail import add_mail_user, clear_mail, leave_mail, list_mail_users, Mailbox, mail_path, remove_mail_user
 from .tools import convert_units, eightball, flip_coin, format_freq, ohms_law, resistor, roll_dice
 from .wx import wx_available
+from .meshrank import route_link
 from .alerts import lookup_warnings
 from .stats import battery_mv, format_stats, format_uptime
 from .reports import REPORTS
@@ -48,6 +49,11 @@ class Ctx:
     @property
     def mention(self) -> str:
         return f"@[{self.sender_name}] " if self.sender_name else ""
+
+    @property
+    def channel_name(self) -> str:
+        """The channel's name on the radio, e.g. '#test', "" in a DM or when unknown."""
+        return state.channel_names.get(self.target[1], "") if self.target and self.target[0] == "chan" else ""
 
     @property
     def budget(self) -> int:
@@ -132,7 +138,7 @@ def help_text(topic: str = "") -> str:
     topic = topic.strip().lower().lstrip("!")
     topic = topic[4:] if topic.startswith("help") else topic
     if topic == "test":
-        return "Mesh: ping (hops), test (hops, distance), !path (repeaters), !dist (leg distances). ping and test need no !"
+        return "Mesh: ping (hops), test (hops, distance), !path (repeaters), !route (map), !dist (leg distances). ping and test need no !"
     if topic == "wx":
         wx = "!wx now, !wxh hourly, !wxf 3-day, " if wx_available() else ""
         return f"Weather: {wx}!warn warnings, !sun, !moon, !aq air, !pollen. Add a place: !sun Cromer, !aq NR1"
@@ -212,19 +218,37 @@ async def _ping(ctx: Ctx) -> str:
 
 @command("test", help="test")
 async def _test(ctx: Ctx) -> str:
-    # '@[Alice] 📡 RX in Norwich | 🐸 (2 hops) | 📏 34km'
+    # '@[Alice] 📡 RX in Norwich | 🐸 (2 hops) | 📏 34km | try !path or !route for more info'
     dish, ruler = ("📡 ", "📏 ") if cfg.USE_EMOJI else ("", "")
     parts = [f"{dish}RX in {cfg.DEFAULT_LOCATION.strip()}" if cfg.DEFAULT_LOCATION.strip() else "Test OK",
              format_rx_report(ctx.rx_info)]
     start, end = ctx.sender_position(), bot_position()
     if start and end:
         parts.append(ruler + distance_text(haversine_km(start, end)))
-    return " | ".join(parts)
+    text = " | ".join(parts)
+    # !route only works on a channel, so a DM is only pointed at !path
+    hint = "try !path or !route for more info" if cfg.MESHRANK_LINKS and ctx.channel_name else "try !path for more info"
+    if len(f"{text} | {hint}".encode("utf-8")) <= ctx.budget:
+        text += f" | {hint}"
+    return text
 
 
 @command("!path", aliases=("trace",), help="test")
 async def _path(ctx: Ctx) -> str:
     return format_path(ctx.rx_info, repeater_names(), budget=ctx.budget)
+
+
+@command("!route", help="test")
+async def _route(ctx: Ctx) -> Optional[str]:
+    """'🗺️ https://meshrank.net/path/65160', the route this message took on MeshRank's map."""
+    if not cfg.MESHRANK_LINKS:
+        return None
+    if not ctx.channel_name:
+        return "!route only works on a public or hashtag channel, MeshRank can't see DMs"
+    link = await route_link(ctx.channel_name, ctx.sender_name, lambda body: parse_command(body)[0] == ctx.cmd)
+    if not link:
+        return "MeshRank hasn't heard your message yet, try again in a minute"
+    return ("🗺️ " if cfg.USE_EMOJI else "") + link
 
 
 @command("!dist", help="test")

@@ -37,6 +37,9 @@ LOCATIONS: dict[str, tuple[float, float]] = {
     "Ipswich": (52.0592, 1.1555),
 }
 
+MESHRANK_LINKS = True           # !route: reply with a meshrank.net link to the route the message took
+MESHRANK_WAIT_SEC = 10          # !route: how long to wait for MeshRank to hear the message
+
 MAX_REPLY_BYTES = 135           # MeshCore limits text by UTF-8 bytes (~160 incl. "name: ")
 USE_EMOJI = True                # False = plain ASCII replies
 USE_MPH = True                  # False = m/s
@@ -211,6 +214,8 @@ _CONFIG_SETTINGS: dict[str, Optional[Callable[[Any], Any]]] = {
     "HTTP_TIMEOUT": None,
     "DEFAULT_LOCATION": None,
     "LOCATIONS": lambda d: {str(k): (float(v[0]), float(v[1])) for k, v in d.items()},
+    "MESHRANK_LINKS": None,
+    "MESHRANK_WAIT_SEC": float,
     "MAX_REPLY_BYTES": None,
     "USE_EMOJI": None,
     "USE_MPH": None,

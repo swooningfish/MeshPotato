@@ -23,6 +23,18 @@ def get_json(url: str, headers: Optional[dict] = None) -> Any:
     return json.loads(get(url, headers).decode("utf-8"))
 
 
+def post_json(url: str, body: Optional[dict] = None) -> Any:
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(body or {}).encode("utf-8"),
+        headers={"User-Agent": "meshcore-meshpotato-bot/1.0", "Accept": "application/json",
+                 "Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=cfg.HTTP_TIMEOUT) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
 class TTLCache:
     """Values kept for `ttl` seconds. Give a function, e.g. lambda: WX_CACHE_SEC, to follow a
     setting that config.toml can change. Every cache is in TTLCache.all for housekeeping."""

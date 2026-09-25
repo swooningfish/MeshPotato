@@ -43,6 +43,7 @@ What MeshPotato does behind the scenes, one area at a time. For what each comman
 - The contact list is read at startup and re-read every 5 minutes if the radio says it changed.
 - A message sent by direct route doesn't carry its path, so the bot says so.
 - `!path` shows the route the message already took. It doesn't send a MeshCore trace packet.
+- For `!route`, the bot reads each channel's name from the radio at start-up. After a `!route` on a channel, it looks up the sender's `!route` message on meshrank.net every 2 seconds, then asks MeshRank to make a share link for it.
 
 ## Positions and distances
 
@@ -146,6 +147,7 @@ Every source except the Met Office forecast is free and needs no key. The bot ca
 | Air quality and pollen | Open-Meteo | 1 hour | `air_cache_sec` |
 | HF and VHF | N0NBH, hamqsl.com | 1 hour (never less) | `hf_cache_sec` |
 | UHF tropo | Open-Meteo | 1 hour | `tropo_cache_sec` |
+| Route links (`!route`) | MeshRank | Not cached | `meshrank_links` |
 
 - **AuroraWatch UK** terms: non-commercial use, credit in every reply, and no more than one request every 3 minutes. The bot also sends a `Referer` header pointing at this repo, and uses their level names unchanged.
 - **Open-Meteo** is free for non-commercial use, and its data is CC BY 4.0, so replies credit it. One request covers both `!aq` and `!pollen` for a place.

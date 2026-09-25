@@ -56,6 +56,8 @@ import meshpotato as mp
     ("!heard 2", ("!who", "2")),
     ("!status Alice", ("!status", "Alice")),
     ("!seen bob", ("!status", "bob")),
+    ("!route", ("!route", "")),
+    ("route", ("", "")),
     ("!bearing Alice", ("!bearing", "Alice")),
     ("!brg NR1", ("!bearing", "NR1")),
     ("!freq pmr", ("!freq", "pmr")),
@@ -1161,22 +1163,104 @@ def test_ping_shows_only_hops(monkeypatch):
 def test_test_shows_rx_report(monkeypatch):
     info = {"path_len": 2, "path_nodes": ["a1", "b2"], "snr": 7.5, "rssi": -85}
     monkeypatch.setattr(mp.state, "radio", None)
+    monkeypatch.setattr(mp.state, "channel_names", {1: "#test"})
     monkeypatch.setattr(mp.config, "LOCATIONS", {"Norwich": NORWICH})
     monkeypatch.setattr(mp.config, "DEFAULT_LOCATION", "Norwich")
+    hint = " | try !path or !route for more info"
     # Sender's position unknown: no distance
-    assert asyncio.run(mp.commands.run_command("test", "", "Bob", info, ("chan", 1))) == \
-        "@[Bob] 📡 RX in Norwich | 🐸 (2 hops)"
+    assert asyncio.run(mp.commands.run_command("test", "", "Bob", info, ("chan", 1))) ==         "@[Bob] 📡 RX in Norwich | 🐸 (2 hops)" + hint
     # Sender advertises a position (Cromer), bot at Norwich
     monkeypatch.setattr(mp.state, "radio", type("Radio", (), {"contacts": GPS_CONTACTS, "self_info": {}})())
-    assert asyncio.run(mp.commands.run_command("test", "", "Alice", info, ("chan", 1))) == \
-        "@[Alice] 📡 RX in Norwich | 🐸 (2 hops) | 📏 34km"
-    assert asyncio.run(mp.commands.run_command("test", "", "", info, ("dm", "d4dd00"))) == \
-        "📡 RX in Norwich | 🐸 (2 hops) | 📏 34km"
+    assert asyncio.run(mp.commands.run_command("test", "", "Alice", info, ("chan", 1))) ==         "@[Alice] 📡 RX in Norwich | 🐸 (2 hops) | 📏 34km" + hint
+    # !route doesn't work in a DM, a channel with no name, or with MeshRank links off
+    assert asyncio.run(mp.commands.run_command("test", "", "", info, ("dm", "d4dd00"))) ==         "📡 RX in Norwich | 🐸 (2 hops) | 📏 34km | try !path for more info"
+    assert asyncio.run(mp.commands.run_command("test", "", "Alice", info, ("chan", 3))) ==         "@[Alice] 📡 RX in Norwich | 🐸 (2 hops) | 📏 34km | try !path for more info"
+    monkeypatch.setattr(mp.config, "MESHRANK_LINKS", False)
+    assert asyncio.run(mp.commands.run_command("test", "", "Alice", info, ("chan", 1))) ==         "@[Alice] 📡 RX in Norwich | 🐸 (2 hops) | 📏 34km | try !path for more info"
+    monkeypatch.setattr(mp.config, "MESHRANK_LINKS", True)
     monkeypatch.setattr(mp.config, "USE_EMOJI", False)
-    assert asyncio.run(mp.commands.run_command("test", "", "Alice", info, ("chan", 1))) == \
-        "@[Alice] RX in Norwich | (2 hops) | 34km"
+    assert asyncio.run(mp.commands.run_command("test", "", "Alice", info, ("chan", 1))) ==         "@[Alice] RX in Norwich | (2 hops) | 34km" + hint
     monkeypatch.setattr(mp.config, "DEFAULT_LOCATION", "")
-    assert asyncio.run(mp.commands.run_command("test", "", "", info)) == "Test OK | (2 hops)"
+    assert asyncio.run(mp.commands.run_command("test", "", "", info)) == "Test OK | (2 hops) | try !path for more info"
+
+
+def test_test_drops_hint_that_does_not_fit(monkeypatch):
+    monkeypatch.setattr(mp.state, "radio", None)
+    monkeypatch.setattr(mp.state, "channel_names", {1: "#test"})
+    monkeypatch.setattr(mp.config, "DEFAULT_LOCATION", "Norwich")
+    monkeypatch.setattr(mp.config, "MAX_REPLY_BYTES", 60)
+    assert asyncio.run(mp.commands.run_command("test", "", "Alice", {"path_len": 2}, ("chan", 1))) ==         "@[Alice] 📡 RX in Norwich | 🐸 (2 hops)"
+
+
+def _meshrank_ts(seconds_ago: float) -> str:
+    return datetime.fromtimestamp(time.time() - seconds_ago, timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _fake_meshrank(monkeypatch, messages, share=None):
+    """MeshRank with these messages on #test. Returns the URLs asked for."""
+    calls = []
+    monkeypatch.setattr(mp.meshrank, "LOOKUP_GAP_SEC", 0)
+    monkeypatch.setattr(mp.net, "get_json", lambda url, headers=None: calls.append(url) or {"messages": messages})
+    monkeypatch.setattr(mp.net, "post_json", lambda url, body=None: calls.append(url) or (
+        share if share is not None else {"ok": True, "code": "65160", "url": "https://meshrank.net/path/65160"}))
+    return calls
+
+
+def test_meshrank_finds_latest_matching_message(monkeypatch):
+    is_test = lambda body: mp.commands.parse_command(body)[0] == "test"
+    calls = _fake_meshrank(monkeypatch, [
+        {"sender": "Alice", "body": "test", "ts": _meshrank_ts(3600), "messageHash": "0LD00000"},
+        {"sender": "Alice", "body": "@[Bot] test", "ts": _meshrank_ts(30), "messageHash": "0f263f80"},
+        {"sender": "Alice", "body": "test of new antenna", "ts": _meshrank_ts(5), "messageHash": "NOTTEST0"},
+        {"sender": "Bob", "body": "test", "ts": _meshrank_ts(2), "messageHash": "B0B00000"},
+    ])
+    assert mp.meshrank.find_message("#test", "Alice", is_test) == "0F263F80"
+    assert calls == ["https://meshrank.net/api/messages?channel=%23test&limit=20"]
+    assert mp.meshrank.find_message("#test", "Carol", is_test) == ""
+
+
+def test_meshrank_share(monkeypatch):
+    calls = _fake_meshrank(monkeypatch, [])
+    assert mp.meshrank.share("0F263F80") == "https://meshrank.net/path/65160"
+    assert calls == ["https://meshrank.net/api/routes/0F263F80/share"]
+    _fake_meshrank(monkeypatch, [], share={"ok": True, "code": "42"})
+    assert mp.meshrank.share("0F263F80") == "https://meshrank.net/path/42"
+    _fake_meshrank(monkeypatch, [], share={"ok": False, "error": "unknown message"})
+    assert mp.meshrank.share("0F263F80") == ""
+
+
+def test_route_replies_with_meshrank_link(monkeypatch):
+    monkeypatch.setattr(mp.state, "radio", None)
+    monkeypatch.setattr(mp.state, "channel_names", {1: "#test"})
+    monkeypatch.setattr(mp.config, "MESHRANK_WAIT_SEC", 0)
+    calls = _fake_meshrank(monkeypatch, [
+        {"sender": "Alice", "body": "!route", "ts": _meshrank_ts(3), "messageHash": "0F263F80"},
+        {"sender": "Bob", "body": "test", "ts": _meshrank_ts(3), "messageHash": "B0B00000"},
+    ])
+    assert asyncio.run(mp.commands.run_command("!route", "", "Alice", {}, ("chan", 1))) ==         "@[Alice] 🗺️ https://meshrank.net/path/65160"
+    assert calls[-1] == "https://meshrank.net/api/routes/0F263F80/share"
+    monkeypatch.setattr(mp.config, "USE_EMOJI", False)
+    assert asyncio.run(mp.commands.run_command("!route", "", "Alice", {}, ("chan", 1))) ==         "@[Alice] https://meshrank.net/path/65160"
+    # Bob's only message MeshRank heard is a test, not his !route
+    assert asyncio.run(mp.commands.run_command("!route", "", "Bob", {}, ("chan", 1))) ==         "@[Bob] MeshRank hasn't heard your message yet, try again in a minute"
+
+
+def test_route_without_meshrank(monkeypatch):
+    monkeypatch.setattr(mp.state, "radio", None)
+    monkeypatch.setattr(mp.state, "channel_names", {1: "#test"})
+    monkeypatch.setattr(mp.config, "MESHRANK_WAIT_SEC", 0)
+    calls = _fake_meshrank(monkeypatch, [])
+    dm = "!route only works on a public or hashtag channel, MeshRank can't see DMs"
+    assert asyncio.run(mp.commands.run_command("!route", "", "", {}, ("dm", "a1b2c3"))) == dm
+    assert asyncio.run(mp.commands.run_command("!route", "", "Alice", {}, ("chan", 3))) == f"@[Alice] {dm}"
+    monkeypatch.setattr(mp.config, "MESHRANK_LINKS", False)
+    assert asyncio.run(mp.commands.run_command("!route", "", "Alice", {}, ("chan", 1))) is None
+    assert calls == []
+    monkeypatch.setattr(mp.config, "MESHRANK_LINKS", True)
+    def down(url, headers=None):
+        raise OSError("no internet")
+    monkeypatch.setattr(mp.net, "get_json", down)
+    assert asyncio.run(mp.commands.run_command("!route", "", "Alice", {}, ("chan", 1))) ==         "@[Alice] MeshRank hasn't heard your message yet, try again in a minute"
 
 
 def test_wx_unknown_place_is_silent(monkeypatch):

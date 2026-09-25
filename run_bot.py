@@ -10,6 +10,7 @@ Commands (channel or direct message):
   ping               -> Pong with hop count         (whole message, a leading ! is optional)
   test               -> RX in DEFAULT_LOCATION, hop count and your distance (same rules as ping)
   !path / !trace     -> The repeaters your message came through, with names where known
+  !route             -> A meshrank.net link to the route your message took (public and hashtag channels)
   !dist              -> Distance of each leg along that path, for repeaters with a known position
   !wx [location]     -> Current conditions from Met Office DataHub (hourly)
   !wxh [location]    -> Next few hours, hour by hour (hourly)

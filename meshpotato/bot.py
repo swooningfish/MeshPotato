@@ -51,6 +51,17 @@ class Bot:
         except Exception as ex:
             _LOGGER.warning("Contact list read failed, !path will show hashes only: %s", ex)
 
+    async def read_channel_names(self) -> None:
+        """MeshRank finds a !route message by its channel name, e.g. '#test'."""
+        for idx in cfg.CHANNEL_IDXS:
+            try:
+                result = await asyncio.wait_for(self.mc.commands.get_channel(idx), timeout=10)
+            except Exception as ex:
+                _LOGGER.warning("Channel %s name read failed, !route won't work there: %s", idx, ex)
+                continue
+            if result.type == EventType.CHANNEL_INFO and (result.payload or {}).get("channel_name"):
+                state.channel_names[idx] = result.payload["channel_name"]
+
     def heard(self, name: str, via: str, info: Optional[dict] = None, key: str = "",
               repeater: bool = False) -> None:
         """An advert (signed) or DM (encrypted to the key) proves this key is about: note it
@@ -197,6 +208,8 @@ class Bot:
         await self.mc.start_auto_message_fetching()
         await self.refresh_contacts()
         _LOGGER.info("%d repeaters known for !path names", len(repeater_names()))
+        await self.read_channel_names()
+        _LOGGER.info("Channel names: %s", state.channel_names)
         heard.log.load(heard_path())
         _LOGGER.info("%d nodes remembered for !who and !status", len(heard.log.nodes))
         mail.box.load(mail_path())

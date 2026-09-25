@@ -43,6 +43,7 @@ Send commands on a channel the bot listens on, or as a direct message (DM) to th
 | `ping` | `🏓 Pong (2 hops)` |
 | `test` | Hops and your distance from the bot |
 | `!path` | The repeaters your message came through |
+| `!route` | A MeshRank map of the route your message took |
 | `!dist` | The distance of each leg of that path |
 | `!who [hours or rpt]` | People (or repeaters) the bot has heard lately |
 | `!status <name>` | When the bot last heard someone, and where they are |

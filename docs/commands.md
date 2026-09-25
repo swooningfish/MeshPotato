@@ -49,7 +49,7 @@ Town names cover Great Britain only. Use a postcode for Northern Ireland. If a p
 | Command | Reply |
 |---------|-------|
 | `ping` | `@[You] 🏓 Pong (2 hops)` |
-| `test` | `@[You] 📡 RX in Norwich \| 🐸 (2 hops) \| 📏 34km` |
+| `test` | `@[You] 📡 RX in Norwich \| 🐸 (2 hops) \| 📏 34km \| try !path or !route for more info` |
 
 | Emoji | Meaning |
 |-------|---------|
@@ -60,12 +60,14 @@ Town names cover Great Britain only. Use a postcode for Northern Ireland. If a p
 - A message that came by a direct route shows `(direct route)`.
 - With no `default_location` set, the reply starts `Test OK`.
 - Distances are in km, or miles with `dist_miles = true`.
+- The `try !path or !route for more info` hint is only added when it fits. In a DM it says `try !path for more info`, because `!route` only works on a channel.
 
-## Path and distance (!path, !dist)
+## Path, route and distance (!path, !route, !dist)
 
 | Command | Reply |
 |---------|-------|
 | `!path` | `@[You] 🛤️ 3 hops: a1 Norwich Cath › b2 › c3` |
+| `!route` | `@[You] 🗺️ https://meshrank.net/path/65160` |
 | `!dist` | `@[You] 📏 You ›15km› a1 ›?› b2 ›5.0km› Bot \| 20km+, 1 of 3 legs unknown \| 34km direct` |
 
 Alias: `!trace` = `!path`.
@@ -74,6 +76,12 @@ Alias: `!trace` = `!path`.
 
 - `0 hops, heard directly` means no repeater was involved.
 - If the path is too long for one message, the names are dropped, then the last repeaters become `+2 more`.
+
+**`!route`** replies with a link to your `!route` message on [MeshRank](https://meshrank.net), which shows the route it took on a map. The link is valid for 24 hours.
+
+- It only works on a public or hashtag channel (such as `#test`), because MeshRank can't read DMs or private channels.
+- MeshRank needs its observers to hear your message. The bot waits up to `meshrank_wait_sec` (10 s), then replies `MeshRank hasn't heard your message yet`.
+- Turn it off with `meshrank_links = false`. The bot then ignores `!route`.
 
 **`!dist`** shows the same path with the distance of each leg:
 
