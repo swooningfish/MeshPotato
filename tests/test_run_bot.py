@@ -463,6 +463,79 @@ def test_radio_lookup_failures(monkeypatch):
     assert asyncio.run(bot.get_uhf("")) == "UHF: lookup failed"
 
 
+NORWICH, CROMER = (52.6278, 1.2983), (52.9310, 1.3020)
+GPS_CONTACTS = {
+    "a1": {"public_key": "a1ff00", "adv_name": "Aylsham RPT", "type": 2, "adv_lat": 52.7960, "adv_lon": 1.2540},
+    "b2": {"public_key": "b2aa00", "adv_name": "No GPS RPT", "type": 2, "adv_lat": 0.0, "adv_lon": 0.0},
+    "c3": {"public_key": "c3cc00", "adv_name": "Hellesdon RPT", "type": 2, "adv_lat": 52.6620, "adv_lon": 1.2500},
+    "al": {"public_key": "d4dd00", "adv_name": "Alice", "type": 1, "adv_lat": CROMER[0], "adv_lon": CROMER[1]},
+}
+
+
+def test_haversine_km():
+    assert bot.haversine_km(NORWICH, CROMER) == pytest.approx(33.7, abs=0.2)
+    assert bot.haversine_km(NORWICH, NORWICH) == 0
+
+
+def test_positions():
+    assert bot.repeater_position("a1", GPS_CONTACTS) == (52.7960, 1.2540)
+    assert bot.repeater_position("b2", GPS_CONTACTS) is None                 # no GPS in its advert
+    assert bot.repeater_position("d4", GPS_CONTACTS) is None                 # a companion, not a repeater
+    assert bot.repeater_position("ee", GPS_CONTACTS) is None                 # unknown
+    assert bot.sender_position(GPS_CONTACTS, name="alice") == CROMER
+    assert bot.sender_position(GPS_CONTACTS, key_prefix="D4DD") == CROMER
+    assert bot.sender_position(GPS_CONTACTS, name="Bob") is None
+
+
+def test_bot_position(monkeypatch):
+    monkeypatch.setattr(bot, "LOCATIONS", {"Norwich": NORWICH})
+    monkeypatch.setattr(bot, "DEFAULT_LOCATION", "Norwich")
+    assert bot.bot_position({"adv_lat": 52.0, "adv_lon": 1.0}) == (52.0, 1.0)
+    assert bot.bot_position({"adv_lat": 0.0, "adv_lon": 0.0}) == NORWICH     # falls back to DEFAULT_LOCATION
+    monkeypatch.setattr(bot, "DEFAULT_LOCATION", "Somewhere")
+    assert bot.bot_position({}) is None
+
+
+def test_format_dist(monkeypatch):
+    info = {"path_len": 3, "path_nodes": ["a1", "b2", "c3"]}
+    out = bot.format_dist(info, GPS_CONTACTS, CROMER, NORWICH)
+    assert out == "📏 You ›15km› a1 ›?› b2 ›?› c3 ›5.0km› Bot | 20km+, 2 of 4 legs unknown | 34km direct"
+    full = bot.format_dist({"path_len": 2, "path_nodes": ["a1", "c3"]}, GPS_CONTACTS, CROMER, NORWICH)
+    assert full == "📏 You ›15km› a1 ›15km› c3 ›5.0km› Bot | 35km total | 34km direct"
+    monkeypatch.setattr(bot, "DIST_MILES", True)
+    assert bot.format_dist({"path_len": 2, "path_nodes": ["a1", "c3"]}, GPS_CONTACTS, CROMER, NORWICH) == \
+        "📏 You ›9.5mi› a1 ›9.3mi› c3 ›3.1mi› Bot | 22mi total | 21mi direct"
+
+
+def test_format_dist_fits_budget():
+    info = {"path_len": 8, "path_nodes": ["a1", "c3"] * 4}
+    out = bot.format_dist(info, GPS_CONTACTS, CROMER, NORWICH, budget=70)
+    assert len(out.encode("utf-8")) <= 70 and out.startswith("📏 8 hops: ") and "direct" in out
+
+
+def test_format_dist_without_positions(monkeypatch):
+    assert bot.format_dist({"path_len": 1, "path_nodes": ["ee"]}, {}, None, None) == \
+        "📏 1 hop, no positions known along the path"
+    assert bot.format_dist({"path_len": 0}, {}, CROMER, NORWICH) == "📏 Heard directly, you are 34km away"
+    assert bot.format_dist({"direct": True}, {}, None, NORWICH) == "📏 Direct route, your position isn't known"
+    assert bot.format_dist({"path_len": 2}, {}, None, NORWICH) == "📏 2 hops, path not reported"
+    monkeypatch.setattr(bot, "USE_EMOJI", False)
+    assert bot.format_dist({"path_len": 1, "path_nodes": ["c3"]}, GPS_CONTACTS, None, NORWICH) == \
+        "Dist: You >?> c3 >5.0km> Bot | 5.0km+, 1 of 2 legs unknown"
+
+
+def test_dist_command(monkeypatch):
+    radio = type("Radio", (), {"contacts": GPS_CONTACTS, "self_info": {"adv_lat": NORWICH[0], "adv_lon": NORWICH[1]}})()
+    monkeypatch.setattr(bot, "_radio", radio)
+    info = {"path_len": 1, "path_nodes": ["a1"]}
+    assert bot.parse_command("!dist") == ("!dist", "")
+    # Channel: the sender is found by name
+    assert asyncio.run(bot.run_command("!dist", "", "Alice", info, ("chan", 1))) == \
+        "@[Alice] 📏 You ›15km› a1 ›19km› Bot | 34km total | 34km direct"
+    # DM: the sender is found by key
+    assert asyncio.run(bot.run_command("!dist", "", "", info, ("dm", "d4dd00"))).startswith("📏 You ›15km› a1")
+
+
 def test_help_fits_one_message(monkeypatch):
     monkeypatch.setattr(bot, "MET_OFFICE_API_KEY", "key")
     assert "!path" in bot.help_text()
@@ -568,9 +641,9 @@ def test_no_api_key_skips_weather(monkeypatch):
     assert asyncio.run(bot.get_weather("Cromer")) is None
     assert asyncio.run(bot.expand_tokens("Morning {wx} {wxf:Cromer}")).strip() == "Morning"
     help_text = bot.help_text()
-    assert "!wx" not in help_text and "!path, !warn/!sun/" in help_text
+    assert "!wx" not in help_text and "!dist, !warn/!sun/" in help_text
     monkeypatch.setattr(bot, "MET_OFFICE_API_KEY", "key")
-    assert "!path, !wx/!wxh/!wxf/!warn/!sun/" in bot.help_text()
+    assert "!dist, !wx/!wxh/!wxf/!warn/!sun/" in bot.help_text()
     assert bot.command_allowed("!wx", admin=False)
 
 

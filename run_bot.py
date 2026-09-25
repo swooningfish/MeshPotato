@@ -8,6 +8,7 @@ Commands (channel or direct message):
   ping               -> Pong with hop count         (whole message, a leading ! is optional)
   test               -> Test OK with hop count, SNR, RSSI and the bot's DEFAULT_LOCATION (same rules as ping)
   !path / !trace     -> The repeaters your message came through, with names where known
+  !dist              -> Distance of each leg along that path, for repeaters with a known position
   !wx [location]     -> Current conditions from Met Office DataHub (hourly)
   !wxh [location]    -> Next few hours, hour by hour (hourly)
   !wxf [location]    -> 3-day forecast from Met Office DataHub (daily)
@@ -110,6 +111,7 @@ LOCATIONS: dict[str, tuple[float, float]] = {
 MAX_REPLY_BYTES = 135           # MeshCore limits text by UTF-8 bytes (~160 incl. "name: ")
 USE_EMOJI = True                # False = plain ASCII replies
 USE_MPH = True                  # False = m/s
+DIST_MILES = False              # !dist in miles instead of km
 WXH_HOURS = 6                   # wxh: max hours to show (cut to fit MAX_REPLY_BYTES)
 WXH_STEP_HOURS = 1              # wxh: 1 = every hour, 2 = every 2 hours, 3 = every 3 hours
 WXH_MENTION_RESERVE = 25        # wxh: bytes kept free for text around {wxh} in schedules
@@ -254,6 +256,7 @@ _CONFIG_SETTINGS: dict[str, Optional[Callable[[Any], Any]]] = {
     "MAX_REPLY_BYTES": None,
     "USE_EMOJI": None,
     "USE_MPH": None,
+    "DIST_MILES": None,
     "WXH_HOURS": None,
     "WXH_STEP_HOURS": None,
     "WXH_MENTION_RESERVE": None,
@@ -480,6 +483,97 @@ def format_path(info: dict[str, Any], names: Optional[dict[str, str]] = None,
             break
         shown.append(node)
     return head + sep.join(shown) + f" +{len(nodes) - len(shown)} more"
+
+
+# ---------- !dist: distance along the path ----------
+EARTH_RADIUS_KM = 6371.0
+KM_PER_MILE = 1.609344
+
+
+def haversine_km(a: tuple[float, float], b: tuple[float, float]) -> float:
+    lat1, lon1, lat2, lon2 = map(math.radians, (*a, *b))
+    h = math.sin((lat2 - lat1) / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin((lon2 - lon1) / 2) ** 2
+    return 2 * EARTH_RADIUS_KM * math.asin(math.sqrt(h))
+
+
+def _gps(node: Optional[dict]) -> Optional[tuple[float, float]]:
+    """(lat, lon) from a contact or self_info, None when the node shares no position (0, 0)."""
+    if not node:
+        return None
+    lat, lon = node.get("adv_lat") or 0.0, node.get("adv_lon") or 0.0
+    return (lat, lon) if (lat, lon) != (0.0, 0.0) else None
+
+
+def repeater_position(node: str, contacts: dict) -> Optional[tuple[float, float]]:
+    """Position of the one repeater whose key starts with the path hash. None when no
+    repeater or several match, because the bot can't tell which one it was."""
+    matches = [c for c in contacts.values()
+               if (c.get("public_key") or "").lower().startswith(node.lower())
+               and c.get("type") != CHAT_NODE_TYPE]
+    return _gps(matches[0]) if len(matches) == 1 else None
+
+
+def sender_position(contacts: dict, name: str = "", key_prefix: str = "") -> Optional[tuple[float, float]]:
+    """Sender's advertised position: by key in a DM, by exact name in a channel (only if one matches)."""
+    if key_prefix:
+        matches = [c for c in contacts.values()
+                   if (c.get("public_key") or "").lower().startswith(key_prefix.lower())]
+    elif name:
+        matches = [c for c in contacts.values() if (c.get("adv_name") or "").strip().lower() == name.lower()]
+    else:
+        return None
+    return _gps(matches[0]) if len(matches) == 1 else None
+
+
+def bot_position(self_info: Optional[dict] = None) -> Optional[tuple[float, float]]:
+    """The bot radio's own advertised position, else DEFAULT_LOCATION if it is in LOCATIONS."""
+    if self_info is None:
+        self_info = getattr(_radio, "self_info", None) or {}
+    pos = _gps(self_info)
+    if pos:
+        return pos
+    for name, latlon in LOCATIONS.items():
+        if name.lower() == DEFAULT_LOCATION.strip().lower():
+            return latlon
+    return None
+
+
+def _distance(km: float) -> str:
+    value, unit = (km / KM_PER_MILE, "mi") if DIST_MILES else (km, "km")
+    return f"{value:.1f}{unit}" if value < 10 else f"{value:.0f}{unit}"
+
+
+def format_dist(info: dict[str, Any], contacts: dict, start: Optional[tuple[float, float]],
+                end: Optional[tuple[float, float]], budget: Optional[int] = None) -> str:
+    """!dist: '📏 You ›4.2km› a1 ›?› b2 ›3.1km› Bot | 7.3km+, 1 of 3 legs unknown | 5.0km direct'.
+    Each leg needs a position at both ends. Drops the leg list, then the direct line, to fit."""
+    budget = MAX_REPLY_BYTES if budget is None else budget
+    icon = "📏 " if USE_EMOJI else "Dist: "
+    if info.get("direct") or not info.get("path_len"):
+        how = "Direct route" if info.get("direct") else "Heard directly"
+        if start and end:
+            return f"{icon}{how}, you are {_distance(haversine_km(start, end))} away"
+        return f"{icon}{how}, your position isn't known" if not start else f"{icon}{how}, bot position not set"
+    nodes = info.get("path_nodes") or []
+    if not nodes:
+        return f"{icon}{_hops(info['path_len'])}, path not reported"
+    points = [("You", start)] + [(n, repeater_position(n, contacts)) for n in nodes] + [("Bot", end)]
+    legs = [haversine_km(a[1], b[1]) if a[1] and b[1] else None for a, b in zip(points, points[1:])]
+    known = [km for km in legs if km is not None]
+    if not known:
+        return f"{icon}{_hops(len(nodes))}, no positions known along the path"
+    arrow = "›" if USE_EMOJI else ">"
+    chain = points[0][0] + "".join(f" {arrow}{_distance(km) if km is not None else '?'}{arrow} {p[0]}"
+                                   for km, p in zip(legs, points[1:]))
+    unknown = len(legs) - len(known)
+    total = f"{_distance(sum(known))}" + (f"+, {unknown} of {len(legs)} legs unknown" if unknown else " total")
+    straight = f"{_distance(haversine_km(start, end))} direct" if start and end else ""
+    for parts in ([chain, total, straight], [chain, total], [f"{_hops(len(nodes))}: {total}", straight],
+                  [f"{_hops(len(nodes))}: {total}"]):
+        text = icon + " | ".join(p for p in parts if p)
+        if len(text.encode("utf-8")) <= budget:
+            return text
+    return text
 
 
 # =====================================================================
@@ -1795,7 +1889,7 @@ def split_sender(text: str) -> tuple[str, str]:
 PLAIN_COMMANDS = {"ping", "test"}
 # Commands that only work with a leading "!" (returned as "!name")
 BANG_COMMANDS = {"help", "roll", "flipacoin", "eightball", "wx", "wxh", "wxf",
-                 "warn", "sun", "moon", "aurora", "aq", "pollen", "path", "hf", "vhf", "uhf",
+                 "warn", "sun", "moon", "aurora", "aq", "pollen", "path", "dist", "hf", "vhf", "uhf",
                  "stats", "uptime", "mute", "unmute", "say"}
 COMMAND_ALIASES = {"8ball": "eightball", "flip": "flipacoin", "coin": "flipacoin", "dice": "roll",
                    "warnings": "warn", "sunrise": "sun", "sunset": "sun", "trace": "path",
@@ -2096,7 +2190,7 @@ PLACE_COMMANDS = ["!warn", "!sun", "!aq", "!pollen", "!uhf"]
 def help_text() -> str:
     """Command list. The weather commands are left out when there is no Met Office API key."""
     place = "/".join((WX_COMMANDS if wx_available() else []) + PLACE_COMMANDS)
-    return f"Cmds: ping, test, !path, {place} [place], !hf, !vhf, !moon, !aurora, !roll [2d6], !flip, !8ball <q>"
+    return f"Cmds: ping, test, !path/!dist, {place} [place], !hf, !vhf, !moon, !aurora, !roll, !flip, !8ball"
 
 
 # Only answered in a DM from a key in ADMIN_PUBKEYS. Channel messages carry no key,
@@ -2216,6 +2310,12 @@ async def run_command(cmd: str, arg: str, sender_name: str, rx_info: dict[str, A
         return f"{mention}Test OK {format_rx_report(rx_info)}{where}"
     if cmd == "!path":
         return mention + format_path(rx_info, repeater_names(),
+                                     budget=MAX_REPLY_BYTES - len(mention.encode("utf-8")))
+    if cmd == "!dist":
+        contacts = getattr(_radio, "contacts", None) or {}
+        dm_key = target[1] if target and target[0] == "dm" else ""
+        start = sender_position(contacts, name=sender_name, key_prefix=dm_key)
+        return mention + format_dist(rx_info, contacts, start, bot_position(),
                                      budget=MAX_REPLY_BYTES - len(mention.encode("utf-8")))
     if cmd == "!help":
         return help_text()

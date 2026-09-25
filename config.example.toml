@@ -27,6 +27,7 @@
 # wx_daily_call_budget = 300        # Met Office calls per UTC day (free tier: 360)
 # use_emoji = true
 # use_mph = true
+# dist_miles = false                # true = !dist in miles instead of km
 # wxh_hours = 6
 # wxh_step_hours = 1
 # warn_cache_sec = 600              # reuse the Met Office warnings feed for 10 min

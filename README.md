@@ -92,6 +92,7 @@ Send `!help` on the mesh for the command list.
 | `ping` | `🏓 Pong (2 hops)` |
 | `test` | Hops, SNR, RSSI and where the bot heard you |
 | `!path` | The repeaters your message came through |
+| `!dist` | Distance of each leg along that path |
 | `!wx [place]` | Current weather |
 | `!wxh [place]` | Hour-by-hour outlook |
 | `!wxf [place]` | 3-day forecast |
@@ -480,6 +481,30 @@ Alias: `!trace`.
 
 `!path` shows the route the message already took. It doesn't send a MeshCore trace packet.
 
+### Distance (!dist)
+
+| Command | Reply |
+|---------|-------|
+| `!dist` | `@[You] 📏 You ›15km› a1 ›?› b2 ›5.0km› Bot \| 20km+, 1 of 3 legs unknown \| 34km direct` |
+
+`!dist` takes the same path as `!path` and shows how far each leg is, from you, through each repeater, to the bot:
+
+- **Legs:** `›15km›` is the straight-line distance between two points. `›?›` means one end has no known position.
+- **Total:** the sum of the known legs. A `+` means some legs are unknown, so the real total is longer.
+- **Direct:** the straight line from you to the bot, when both positions are known. Comparing it with the total shows how far the path wandered.
+- **Long paths:** if the reply doesn't fit in one message, the leg list is dropped first, then the direct line.
+- **Units:** km by default. Set `dist_miles = true` for miles.
+
+Where positions come from:
+
+| Point | Position |
+|-------|----------|
+| You | The location in your advert. In a DM the bot matches your key. In a channel it matches your name, and only if exactly one contact has it |
+| Repeater | The location in its advert, when exactly one repeater in the bot's contacts matches the hash, as for `!path` names |
+| Bot | The location set on the bot's radio, else `default_location` if it is one of your `[locations]` |
+
+A node only has a position if its owner has set one and it is included in its adverts. Many companions and some repeaters leave it out. MeshCore sends 0,0 for "no position", which the bot treats as unknown. Distances are straight lines between the advertised points, not the path the radio waves took.
+
 ### Weather (!wx, !wxh, !wxf)
 
 | Command | Reply |
@@ -817,6 +842,7 @@ The bot reads `config.toml` from the folder `run_bot.py` is in. To use another f
 | **Replies** | | |
 | `use_emoji` | `true` | `false` for plain text |
 | `use_mph` | `true` | `false` for m/s |
+| `dist_miles` | `false` | `true` to show `!dist` in miles |
 | `max_reply_bytes` | `135` | MeshCore limits messages by bytes. Emojis take 4 to 7 bytes each |
 | **Weather** | | |
 | `wx_cache_sec` | `1800` | How long to reuse a forecast (30 minutes) |
