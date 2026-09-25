@@ -132,7 +132,7 @@ def help_text(topic: str = "") -> str:
     topic = topic.strip().lower().lstrip("!")
     topic = topic[4:] if topic.startswith("help") else topic
     if topic == "test":
-        return "Mesh: ping (hops), test (SNR, RSSI, distance), !path (repeaters), !dist (leg distances). ping and test need no !"
+        return "Mesh: ping (hops), test (hops, distance), !path (repeaters), !dist (leg distances). ping and test need no !"
     if topic == "wx":
         wx = "!wx now, !wxh hourly, !wxf 3-day, " if wx_available() else ""
         return f"Weather: {wx}!warn warnings, !sun, !moon, !aq air, !pollen. Add a place: !sun Cromer, !aq NR1"
@@ -212,7 +212,7 @@ async def _ping(ctx: Ctx) -> str:
 
 @command("test", help="test")
 async def _test(ctx: Ctx) -> str:
-    # '@[Alice] 📡 RX in Norwich | 🐸 (2 hops) 📶 SNR 7.5dB 〰️ RSSI -85dBm | 📏 34km'
+    # '@[Alice] 📡 RX in Norwich | 🐸 (2 hops) | 📏 34km'
     dish, ruler = ("📡 ", "📏 ") if cfg.USE_EMOJI else ("", "")
     parts = [f"{dish}RX in {cfg.DEFAULT_LOCATION.strip()}" if cfg.DEFAULT_LOCATION.strip() else "Test OK",
              format_rx_report(ctx.rx_info)]

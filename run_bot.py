@@ -8,7 +8,7 @@ The code is in the meshpotato package next to this file, one module per feature.
 
 Commands (channel or direct message):
   ping               -> Pong with hop count         (whole message, a leading ! is optional)
-  test               -> RX in DEFAULT_LOCATION, hop count, SNR, RSSI and your distance (same rules as ping)
+  test               -> RX in DEFAULT_LOCATION, hop count and your distance (same rules as ping)
   !path / !trace     -> The repeaters your message came through, with names where known
   !dist              -> Distance of each leg along that path, for repeaters with a known position
   !wx [location]     -> Current conditions from Met Office DataHub (hourly)

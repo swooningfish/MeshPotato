@@ -4,7 +4,7 @@ MeshPotato is a chat bot for a [MeshCore](https://github.com/meshcore-dev) mesh 
 
 What it can do:
 
-- 🏓 **Signal checks:** hops, SNR, RSSI and the repeaters your message went through
+- 🏓 **Signal checks:** hops and the repeaters your message went through
 - 👥 **Who's about:** who the bot has heard, where they are, and which frequencies to try (works without internet)
 - 📮 **Mailbox:** leave a message for someone out of range, delivered when the bot next hears them
 - 🌦️ **Weather:** Met Office current weather, hourly and 3-day forecasts, and weather warnings
@@ -41,7 +41,7 @@ Send commands on a channel the bot listens on, or as a direct message (DM) to th
 | Command | What you get |
 |---------|--------------|
 | `ping` | `🏓 Pong (2 hops)` |
-| `test` | Hops, SNR, RSSI and your distance from the bot |
+| `test` | Hops and your distance from the bot |
 | `!path` | The repeaters your message came through |
 | `!dist` | The distance of each leg of that path |
 | `!who [hours or rpt]` | People (or repeaters) the bot has heard lately |

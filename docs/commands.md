@@ -49,14 +49,12 @@ Town names cover Great Britain only. Use a postcode for Northern Ireland. If a p
 | Command | Reply |
 |---------|-------|
 | `ping` | `@[You] 🏓 Pong (2 hops)` |
-| `test` | `@[You] 📡 RX in Norwich \| 🐸 (2 hops) 📶 SNR 7.5dB 〰️ RSSI -85dBm \| 📏 34km` |
+| `test` | `@[You] 📡 RX in Norwich \| 🐸 (2 hops) \| 📏 34km` |
 
 | Emoji | Meaning |
 |-------|---------|
 | 📡 | Where the bot heard you (`default_location`) |
 | 🐸 | Hops: how many repeaters your message went through |
-| 📶 | SNR: how clearly your signal stood out from the noise |
-| 〰️ | RSSI: received signal strength |
 | 📏 | Straight-line distance from you to the bot, if both positions are known |
 
 - A message that came by a direct route shows `(direct route)`.

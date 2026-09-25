@@ -33,7 +33,6 @@ What MeshPotato does behind the scenes, one area at a time. For what each comman
 ## Signal reports (test)
 
 - The hop count comes from the message itself.
-- SNR and RSSI come from the message when the radio reports them, otherwise from the radio's receive log for the same packet. Values the radio doesn't report are left out.
 - The path itself isn't shown in `test`, because a long path would make the reply too long. Use `!path` for that.
 
 ## Paths and repeater names

@@ -92,15 +92,9 @@ def format_hops(info: dict[str, Any]) -> str:
 
 
 def format_rx_report(info: dict[str, Any]) -> str:
-    """test: '🐸 (2 hops) 📶 SNR 7.5dB 〰️ RSSI -85dBm', plain '(2 hops) SNR 7.5dB RSSI -85dBm'.
+    """test: '🐸 (2 hops)', plain '(2 hops)'.
     The path addresses are left out, because a long path pushes the reply past MAX_REPLY_BYTES."""
-    parts = [("🐸 " if cfg.USE_EMOJI else "") + format_hops(info)]
-    snr, rssi = ("📶 SNR", "〰️ RSSI") if cfg.USE_EMOJI else ("SNR", "RSSI")
-    if info.get("snr") is not None:
-        parts.append(f"{snr} {info['snr']:g}dB")
-    if info.get("rssi") is not None:
-        parts.append(f"{rssi} {info['rssi']}dBm")
-    return " ".join(parts)
+    return ("🐸 " if cfg.USE_EMOJI else "") + format_hops(info)
 
 
 def _node_label(node: str, names: dict[str, str]) -> str:
