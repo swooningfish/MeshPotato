@@ -64,6 +64,12 @@ def contact_name(c: dict) -> str:
     return (c.get("adv_name") or "").strip()
 
 
+def contact_by_name(contacts: dict, name: str) -> Optional[dict]:
+    """The one contact called exactly `name`, any case. None when none or several match."""
+    found = [c for c in contacts.values() if contact_name(c).lower() == name.strip().lower()] if name.strip() else []
+    return found[0] if len(found) == 1 else None
+
+
 def find_contacts(contacts: dict, query: str) -> list[dict]:
     return match_names(list(contacts.values()), query, contact_name)
 

@@ -17,7 +17,7 @@ from . import net
 _LOGGER = logging.getLogger("meshpotato_bot")
 
 MESHRANK_URL = "https://meshrank.net"
-LOOKUP_GAP_SEC = 2          # between lookups while MeshRank hasn't heard the message yet
+LOOKUP_GAP_SEC = 3          # between lookups while MeshRank hasn't heard the message yet
 MAX_AGE_SEC = 600           # only match a message MeshRank heard in the last 10 min
 
 
@@ -34,8 +34,12 @@ def find_message(channel: str, sender: str, matches: Callable[[str], bool]) -> s
     url = f"{MESHRANK_URL}/api/messages?" + urllib.parse.urlencode({"channel": channel, "limit": 20})
     messages = (net.get_json(url) or {}).get("messages") or []
     for m in sorted(messages, key=lambda m: str(m.get("ts", "")), reverse=True):
-        if m.get("sender") == sender and matches(m.get("body") or "") and _age(m.get("ts")) < MAX_AGE_SEC:
-            return str(m.get("messageHash") or m.get("frameHash") or m.get("id") or "").upper()
+        if m.get("sender") == sender and matches(m.get("body") or ""):
+            age = _age(m.get("ts"))
+            if age < MAX_AGE_SEC:
+                return str(m.get("messageHash") or m.get("frameHash") or m.get("id") or "").upper()
+            _LOGGER.info("MeshRank: skipped %s's message from %.0fs ago (is the clock right?)", sender, age)
+            break
     return ""
 
 
@@ -48,13 +52,18 @@ def share(message_id: str) -> str:
 
 
 def _link_sync(channel: str, sender: str, matches: Callable[[str], bool], wait: float) -> str:
-    deadline = time.monotonic() + wait
+    started = time.monotonic()
     while True:
         time.sleep(LOOKUP_GAP_SEC)
         message_id = find_message(channel, sender, matches)
         if message_id:
-            return share(message_id)
-        if time.monotonic() + LOOKUP_GAP_SEC > deadline:
+            link = share(message_id)
+            _LOGGER.info("MeshRank: %s heard after %.0fs, link %s", message_id, time.monotonic() - started,
+                         link or "refused")
+            return link
+        if time.monotonic() - started + LOOKUP_GAP_SEC > wait:
+            _LOGGER.info("MeshRank: no message from %s on %s after %.0fs", sender, channel,
+                         time.monotonic() - started)
             return ""
 
 

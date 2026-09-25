@@ -80,7 +80,7 @@ Anything you leave out keeps its default.
 | `dist_miles` | `false` | `true` for distances in miles |
 | `max_reply_bytes` | `135` | Longest reply. Emojis take 4 to 7 bytes each |
 | `meshrank_links` | `true` | `!route` replies with a meshrank.net link to the route your message took. `false` turns `!route` off |
-| `meshrank_wait_sec` | `10` | How long `!route` waits for MeshRank to hear your message |
+| `meshrank_wait_sec` | `30` | How long `!route` waits for MeshRank to hear your message |
 
 ### Weather
 

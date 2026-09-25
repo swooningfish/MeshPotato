@@ -1241,8 +1241,25 @@ def test_route_replies_with_meshrank_link(monkeypatch):
     assert calls[-1] == "https://meshrank.net/api/routes/0F263F80/share"
     monkeypatch.setattr(mp.config, "USE_EMOJI", False)
     assert asyncio.run(mp.commands.run_command("!route", "", "Alice", {}, ("chan", 1))) ==         "@[Alice] https://meshrank.net/path/65160"
-    # Bob's only message MeshRank heard is a test, not his !route
+    # Bob's only message MeshRank heard is a test, not his !route. The bot doesn't know his key: say it on the channel
     assert asyncio.run(mp.commands.run_command("!route", "", "Bob", {}, ("chan", 1))) ==         "@[Bob] MeshRank hasn't heard your message yet, try again in a minute"
+
+
+def test_route_miss_is_a_dm_when_the_sender_is_a_contact(monkeypatch):
+    sender = _FakeSender()
+    contacts = {"b0b0": {"public_key": "B0B0B0B0B0B0B0B0", "adv_name": "Bob 🐬", "type": 1},
+                "c4c4": {"public_key": "c4c4", "adv_name": "Carol", "type": 1},
+                "c5c5": {"public_key": "c5c5", "adv_name": "carol", "type": 1}}
+    monkeypatch.setattr(mp.state, "radio", type("Radio", (), {"contacts": contacts, "self_info": {}})())
+    monkeypatch.setattr(mp.state, "tx", sender)
+    monkeypatch.setattr(mp.state, "channel_names", {1: "#test"})
+    monkeypatch.setattr(mp.config, "MESHRANK_WAIT_SEC", 0)
+    _fake_meshrank(monkeypatch, [])
+    assert asyncio.run(mp.commands.run_command("!route", "", "Bob 🐬", {}, ("chan", 1))) is None
+    assert sender.sent == [("b0b0b0b0b0b0", "MeshRank hasn't heard your message yet, try again in a minute")]
+    # Two contacts called Carol: the bot can't tell which, so it says it on the channel
+    assert asyncio.run(mp.commands.run_command("!route", "", "Carol", {}, ("chan", 1))) ==         "@[Carol] MeshRank hasn't heard your message yet, try again in a minute"
+    assert len(sender.sent) == 1
 
 
 def test_route_without_meshrank(monkeypatch):

@@ -15,7 +15,7 @@ from . import alerts
 from .state import mute_remaining
 from .text import duration, plural
 from .storage import save_part
-from .contacts import contact_by_key, contact_name, is_admin, key_id, repeater_names
+from .contacts import contact_by_key, contact_by_name, contact_name, is_admin, key_id, repeater_names
 from .rx import format_hops, format_path, format_rx_report
 from .geo import bot_position, distance_text, format_dist, get_bearing, haversine_km, sender_position
 from .heard import format_status, format_who, Heard, heard_path
@@ -247,7 +247,13 @@ async def _route(ctx: Ctx) -> Optional[str]:
         return "!route only works on a public or hashtag channel, MeshRank can't see DMs"
     link = await route_link(ctx.channel_name, ctx.sender_name, lambda body: parse_command(body)[0] == ctx.cmd)
     if not link:
-        return "MeshRank hasn't heard your message yet, try again in a minute"
+        miss = "MeshRank hasn't heard your message yet, try again in a minute"
+        # Only the sender cares, so keep it off the channel when the bot can DM them
+        contact = contact_by_name(ctx.contacts, ctx.sender_name)
+        if contact and contact.get("public_key") and state.tx is not None:
+            state.tx.dm(key_id(contact["public_key"]), miss)
+            return None
+        return miss
     return ("🗺️ " if cfg.USE_EMOJI else "") + link
 
 

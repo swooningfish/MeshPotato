@@ -80,7 +80,7 @@ Alias: `!trace` = `!path`.
 **`!route`** replies with a link to your `!route` message on [MeshRank](https://meshrank.net), which shows the route it took on a map. The link is valid for 24 hours.
 
 - It only works on a public or hashtag channel (such as `#test`), because MeshRank can't read DMs or private channels.
-- MeshRank needs its observers to hear your message. The bot waits up to `meshrank_wait_sec` (10 s), then replies `MeshRank hasn't heard your message yet`.
+- MeshRank only gets your message once its observers upload it, which can take 10 seconds or more. The bot keeps looking for up to `meshrank_wait_sec` (30 s), then replies `MeshRank hasn't heard your message yet`. That reply is a DM when the bot has you as a contact, so it doesn't clutter the channel.
 - Turn it off with `meshrank_links = false`. The bot then ignores `!route`.
 
 **`!dist`** shows the same path with the distance of each leg:

@@ -38,7 +38,7 @@ LOCATIONS: dict[str, tuple[float, float]] = {
 }
 
 MESHRANK_LINKS = True           # !route: reply with a meshrank.net link to the route the message took
-MESHRANK_WAIT_SEC = 10          # !route: how long to wait for MeshRank to hear the message
+MESHRANK_WAIT_SEC = 30          # !route: how long to wait for MeshRank to hear the message
 
 MAX_REPLY_BYTES = 135           # MeshCore limits text by UTF-8 bytes (~160 incl. "name: ")
 USE_EMOJI = True                # False = plain ASCII replies

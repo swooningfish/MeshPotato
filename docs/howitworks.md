@@ -43,7 +43,7 @@ What MeshPotato does behind the scenes, one area at a time. For what each comman
 - The contact list is read at startup and re-read every 5 minutes if the radio says it changed.
 - A message sent by direct route doesn't carry its path, so the bot says so.
 - `!path` shows the route the message already took. It doesn't send a MeshCore trace packet.
-- For `!route`, the bot reads each channel's name from the radio at start-up. After a `!route` on a channel, it looks up the sender's `!route` message on meshrank.net every 2 seconds, then asks MeshRank to make a share link for it.
+- For `!route`, the bot reads each channel's name from the radio at start-up. After a `!route` on a channel, it looks up the sender's `!route` message on meshrank.net every 3 seconds, then asks MeshRank to make a share link for it.
 
 ## Positions and distances
 
