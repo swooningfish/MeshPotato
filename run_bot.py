@@ -3693,7 +3693,7 @@ if __name__ == "__main__":
         _LOGGER.info("Settings loaded from %s", loaded)
     try:
         if not wx_available() and (args.wx, args.wxh, args.wxf) != (None, None, None):
-            raise SystemExit("No Met Office API key set, see section 3.5 of README.md")
+            raise SystemExit("No Met Office API key set, see steps 4 and 5 in README.md, or docs/settings.md")
         if args.wx is not None:
             print(trim(asyncio.run(get_weather(args.wx)) or ""))
         elif args.wxh is not None:
