@@ -26,11 +26,13 @@ Commands (channel or direct message):
   !mute <minutes>    -> Stop replies and scheduled messages for a while (admin DMs only)
   !unmute            -> End a mute early (admin DMs only)
   !say <ch> <text>   -> Post text to a channel as the bot (admin DMs only)
-  !help              -> Help topics: !helptest, !helpwx, !helpradio, !helpfun (the ! is required)
+  !help              -> Help topics: !helptest, !helpwx, !helpradio, !helpfun, !helpconv (the ! is required)
   !roll [NdS+M]      -> Roll dice: !roll, !roll d20, !roll 2d6+3
   !flipacoin         -> Heads or tails
   !eightball <q>     -> Ask the eight ball a yes/no question
   !conv <n> <unit> [unit] -> Unit conversion: !conv 10 mi km, !conv 20 c, !conv 868 mhz
+  !ohm <two of V/A/Ω/W>   -> Ohm's law and power: !ohm 12v 2a, !ohm 5v 220r, !ohm 10w 50ohm
+  !res <colours|value>    -> Resistor colour code both ways: !res yellow violet red gold, !res 4k7
 
 [location] accepts:
   - a name from LOCATIONS below        (!wx home)
@@ -1890,13 +1892,14 @@ def split_sender(text: str) -> tuple[str, str]:
 # Commands that work with or without a leading "!", but only as the whole message
 PLAIN_COMMANDS = {"ping", "test"}
 # Commands that only work with a leading "!" (returned as "!name")
-BANG_COMMANDS = {"help", "helptest", "helpwx", "helpradio", "helpfun", "conv", "roll", "flipacoin", "eightball", "wx", "wxh", "wxf",
+BANG_COMMANDS = {"help", "helptest", "helpwx", "helpradio", "helpfun", "helpconv", "conv", "ohm", "res", "roll", "flipacoin", "eightball", "wx", "wxh", "wxf",
                  "warn", "sun", "moon", "aurora", "aq", "pollen", "path", "dist", "hf", "vhf", "uhf",
                  "stats", "uptime", "mute", "unmute", "say"}
 COMMAND_ALIASES = {"8ball": "eightball", "flip": "flipacoin", "coin": "flipacoin", "dice": "roll",
                    "warnings": "warn", "sunrise": "sun", "sunset": "sun", "trace": "path",
                    "solar": "aurora", "air": "aq", "bands": "hf", "tropo": "uhf",
-                   "convert": "conv", "units": "conv"}
+                   "convert": "conv", "units": "conv", "ohms": "ohm", "vir": "ohm", "ohmslaw": "ohm",
+                   "resistor": "res", "colour": "res", "color": "res"}
 
 
 def parse_command(body: str) -> tuple[str, str]:
@@ -2188,6 +2191,7 @@ async def scheduler(sender: Sender, entries: list[dict]) -> None:
 # =====================================================================
 WX_COMMANDS = ["!wx", "!wxh", "!wxf"]             # need a Met Office API key
 PLACE_COMMANDS = ["!warn", "!sun", "!aq", "!pollen", "!uhf"]
+HELP_TOPICS = ("test", "wx", "radio", "fun", "conv")
 
 
 def help_text(topic: str = "") -> str:
@@ -2201,10 +2205,12 @@ def help_text(topic: str = "") -> str:
         wx = "!wx now, !wxh hourly, !wxf 3-day, " if wx_available() else ""
         return f"Weather: {wx}!warn warnings, !sun, !moon, !aq air, !pollen. Add a place: !sun Cromer, !aq NR1"
     if topic == "radio":
-        return "Radio: !hf HF bands, !vhf 6m/4m/2m, !uhf [place] tropo, !aurora geomagnetic. Also !conv 5 w dbm, !conv 868 mhz"
+        return "Radio: !hf HF bands, !vhf 6m/4m/2m, !uhf [place] tropo, !aurora geomagnetic. See !helpconv for dBm and Ohm's law"
     if topic == "fun":
-        return "Fun: !roll [2d6+1] dice, !flip coin, !8ball <q>, !conv <n> <unit> [unit] e.g. !conv 10 mi km, !conv 20 c"
-    return "Help: !helptest (ping, path), !helpwx (weather, sun, air), !helpradio (bands, aurora), !helpfun (dice, units)"
+        return "Fun: !roll [2d6+1] dice, !flip coin, !8ball <question>"
+    if topic == "conv":
+        return "Conversions: !conv 10 mi km, !conv 5 w dbm. !ohm two of V/A/Ω/W, e.g. !ohm 12v 2a. !res 4k7 or !res yellow violet red"
+    return "Help: !helptest (ping, path), !helpwx (weather), !helpradio (bands), !helpfun (dice), !helpconv (units, ohms, resistors)"
 
 
 # Only answered in a DM from a key in ADMIN_PUBKEYS. Channel messages carry no key,
@@ -2423,7 +2429,7 @@ def convert_units(arg: str) -> str:
     dst = tokens[1] if len(tokens) == 2 else CONV_DEFAULT_TO.get(src, "")
     for name in (src, dst):
         if name not in UNITS:
-            return f"Unknown unit '{name[:20]}'. Try !conv 10 mi km or see !helpfun"
+            return f"Unknown unit '{name[:20]}'. Try !conv 10 mi km or see !helpconv"
     s_dim, s_to, _, s_label = UNITS[src]
     d_dim, _, d_from, d_label = UNITS[dst]
     try:
@@ -2444,6 +2450,217 @@ def convert_units(arg: str) -> str:
         return f"Can't convert: {e}"
     icon = "📐 " if USE_EMOJI else ""
     return f"{icon}{_with_unit(value, s_label)} = {_with_unit(result, d_label)}"
+
+
+
+# ---------- Ohm's law (V = I x R) and power (P = V x I) ----------
+OHM_PREFIXES = {"u": 1e-6, "µ": 1e-6, "m": 1e-3, "k": 1e3, "K": 1e3, "M": 1e6}
+OHM_UNITS = {"v": "V", "volt": "V", "volts": "V", "a": "I", "amp": "I", "amps": "I",
+             "ohm": "R", "ohms": "R", "ω": "R", "r": "R", "": "R",
+             "w": "P", "watt": "P", "watts": "P"}
+OHM_LABELS = {"V": "V", "I": "A", "R": "Ω", "P": "W"}
+OHM_RE = re.compile(r"(\d+\.?\d*|\.\d+)\s*([uµmkKM]?)([a-zA-ZΩω]*)")
+OHM_USAGE = "Use !ohm with two of V, A, Ω, W: !ohm 12v 2a, !ohm 5v 220r, !ohm 10w 50ohm, !ohm 4.7k 20ma"
+
+
+def _ohm_term(number: str, prefix: str, unit: str) -> Optional[tuple[str, float]]:
+    """('12', '', 'v') -> ('V', 12.0). 'M' is mega and 'm' milli: '1M' is 1 MΩ, '20mA' is 20 mA.
+    A bare prefix is ohms ('4.7k'), a bare number is not allowed."""
+    unit = unit.lower()
+    if unit not in OHM_UNITS or not (unit or prefix):
+        return None
+    return OHM_UNITS[unit], float(number) * OHM_PREFIXES.get(prefix, 1)
+
+
+def _si(value: float, label: str) -> str:
+    """0.25 A -> '250 mA', 4700 Ω -> '4.7 kΩ'."""
+    for prefix, scale in (("G", 1e9), ("M", 1e6), ("k", 1e3), ("", 1), ("m", 1e-3), ("µ", 1e-6)):
+        if abs(value) >= scale or prefix == "µ":
+            return f"{_num(value / scale)} {prefix}{label}"
+    return f"{_num(value)} {label}"
+
+
+def ohms_law(arg: str) -> str:
+    """Any two of voltage, current, resistance and power give the other two."""
+    known: dict[str, float] = {}
+    text = arg.strip().replace(",", "")
+    terms = OHM_RE.findall(text)
+    if len(terms) != 2 or OHM_RE.sub("", text).strip():
+        return OHM_USAGE
+    for term in terms:
+        parsed = _ohm_term(*term)
+        if parsed is None:
+            unit = (term[1] + term[2])[:10]
+            return f"Unknown unit '{unit}'. See !helpconv" if unit else "Give each value a unit: V, A, Ω or W"
+        known[parsed[0]] = parsed[1]
+    if len(known) != 2:
+        return "Give two different values, such as volts and amps"
+    if min(known.values()) <= 0:
+        return "Values must be above 0"
+    v, i, r, p = (known.get(k) for k in "VIRP")
+    if v is not None and i is not None:
+        r, p = v / i, v * i
+    elif v is not None and r is not None:
+        i, p = v / r, v * v / r
+    elif v is not None and p is not None:
+        i, r = p / v, v * v / p
+    elif i is not None and r is not None:
+        v, p = i * r, i * i * r
+    elif i is not None and p is not None:
+        v, r = p / i, p / (i * i)
+    else:
+        v, i = math.sqrt(p * r), math.sqrt(p / r)
+    values = {"V": v, "I": i, "R": r, "P": p}
+    given = ", ".join(_si(values[k], OHM_LABELS[k]) for k in "VIRP" if k in known)
+    found = ", ".join(_si(values[k], OHM_LABELS[k]) for k in "VIRP" if k not in known)
+    icon, arrow = ("⚡ ", "→") if USE_EMOJI else ("", "->")
+    return f"{icon}{given} {arrow} {found}"
+
+
+
+# ---------- Resistor colour code (IEC 60062) ----------
+RES_DIGITS = ["black", "brown", "red", "orange", "yellow", "green", "blue", "violet", "grey", "white"]
+RES_MULT = {**{c: i for i, c in enumerate(RES_DIGITS)}, "gold": -1, "silver": -2}    # power of 10
+RES_TOL = {"brown": 1, "red": 2, "orange": 0.05, "yellow": 0.02, "green": 0.5, "blue": 0.25,
+           "violet": 0.1, "grey": 0.01, "gold": 5, "silver": 10}                     # ± %
+RES_TEMPCO = {"black": 250, "brown": 100, "red": 50, "orange": 15, "yellow": 25, "green": 20,
+              "blue": 10, "violet": 5, "grey": 1}                                    # ppm/K
+RES_ALIASES = {"purple": "violet", "gray": "grey", "bk": "black", "blk": "black", "bn": "brown",
+               "brn": "brown", "rd": "red", "og": "orange", "org": "orange", "ye": "yellow",
+               "yel": "yellow", "gn": "green", "grn": "green", "bu": "blue", "blu": "blue",
+               "vi": "violet", "vio": "violet", "gy": "grey", "gry": "grey", "wh": "white",
+               "wht": "white", "gd": "gold", "gld": "gold", "sv": "silver", "sr": "silver",
+               "slv": "silver"}
+# Grey, gold and silver have no coloured square, so they get the nearest emoji
+RES_EMOJI = {"black": "⬛", "brown": "🟫", "red": "🟥", "orange": "🟧", "yellow": "🟨", "green": "🟩",
+             "blue": "🟦", "violet": "🟪", "grey": "🩶", "white": "⬜", "gold": "🥇", "silver": "🥈"}
+RES_RKM_RE = re.compile(r"^(\d+)([rkmg])(\d*)$")                 # 4k7, 4r7, 470r, 1m
+RES_VALUE_RE = re.compile(r"^(\d+\.?\d*|\.\d+)([kmg]?)(?:ohms?|ω|r)?$")
+RES_TOL_RE = re.compile(r"^±?(\d+\.?\d*|\.\d+)%$")
+RES_SCALE = {"r": 1, "": 1, "k": 1e3, "m": 1e6, "g": 1e9}
+RES_USAGE = "Use !res <colours> or !res <value>, e.g. !res yellow violet red gold, !res 4k7, !res 10k 1%"
+
+
+def _res_value(ohms: float) -> str:
+    """4700 -> '4.7 kΩ', 0.47 -> '0.47 Ω'."""
+    return f"{_num(ohms)} Ω" if ohms < 1 else _si(ohms, "Ω")
+
+
+def _res_colour(token: str) -> str:
+    token = token.lower()
+    return RES_ALIASES.get(token, token)
+
+
+def _band_names(bands: list[str]) -> str:
+    return " ".join(b.title() for b in bands)
+
+
+def _bands_text(bands: list[str], names: bool = True) -> str:
+    """'🟨🟪🟥🥇 Yellow Violet Red Gold', or just the squares when names=False.
+    Plain names when USE_EMOJI is off."""
+    if not USE_EMOJI:
+        return _band_names(bands)
+    strip = "".join(RES_EMOJI[b] for b in bands)
+    return f"{strip} {_band_names(bands)}" if names else strip
+
+
+def resistor_from_colours(bands: list[str]) -> str:
+    """3 bands: 2 digits and multiplier (±20%). 4: plus tolerance. 5: 3 digits. 6: plus tempco.
+    Raises ValueError with the reply for a bad code."""
+    if bands == ["black"]:
+        return f"{_bands_text(bands)} = 0 Ω zero-ohm link"
+    if bands[0] in ("gold", "silver") and bands[-1] not in ("gold", "silver"):
+        bands = bands[::-1]                                     # read from the wrong end
+    if not 3 <= len(bands) <= 6:
+        raise ValueError("Give 3 to 6 bands, e.g. !res brown black red gold")
+    digit_count = 3 if len(bands) >= 5 else 2
+    digits, mult, rest = bands[:digit_count], bands[digit_count], bands[digit_count + 1:]
+    if any(b not in RES_DIGITS for b in digits):
+        raise ValueError(f"{_band_names(digits)}: digit bands can't be gold or silver")
+    if mult not in RES_MULT:
+        raise ValueError(f"{mult.title()} isn't a multiplier band")
+    tol = RES_TOL.get(rest[0]) if rest else 20
+    if tol is None:
+        raise ValueError(f"{rest[0].title()} isn't a tolerance band")
+    ohms = int("".join(str(RES_DIGITS.index(b)) for b in digits)) * 10.0 ** RES_MULT[mult]
+    text = f"{_bands_text(bands)} = {_res_value(ohms)} ±{_num(tol)}%"
+    if len(rest) == 2:
+        if rest[1] not in RES_TEMPCO:
+            raise ValueError(f"{rest[1].title()} isn't a tempco band")
+        text += f" {RES_TEMPCO[rest[1]]}ppm/K"
+    return text
+
+
+def _colour_bands(ohms: float, digit_count: int) -> Optional[list[str]]:
+    """The digit and multiplier bands for `ohms`, or None if it needs more digits than that."""
+    exp = math.floor(math.log10(ohms)) - (digit_count - 1)
+    digits = round(ohms / 10.0 ** exp)
+    if digits >= 10 ** digit_count:                             # rounding went up a decade
+        exp, digits = exp + 1, round(ohms / 10.0 ** (exp + 1))
+    if not -2 <= exp <= 9 or not math.isclose(digits * 10.0 ** exp, ohms, rel_tol=1e-9):
+        return None
+    mult = RES_DIGITS[exp] if exp >= 0 else ("gold" if exp == -1 else "silver")
+    return [RES_DIGITS[int(d)] for d in str(digits)] + [mult]
+
+
+def resistor_to_colours(value: str, tol: Optional[float] = None, budget: Optional[int] = None) -> str:
+    """4-band (default ±5% gold) and 5-band (default ±1% brown) codes for a value.
+    The colour names are dropped from beside the emoji when both codes don't fit in `budget`.
+    Raises ValueError with the reply for a bad value."""
+    m = RES_RKM_RE.match(value)
+    if m:
+        ohms = float(f"{m.group(1)}.{m.group(3) or 0}") * RES_SCALE[m.group(2)]
+    else:
+        m = RES_VALUE_RE.match(value)
+        if not m:
+            raise ValueError(RES_USAGE)
+        ohms = float(m.group(1)) * RES_SCALE[m.group(2)]
+    if ohms == 0:
+        return f"0 Ω: {_bands_text(['black'])} (zero-ohm link)"
+    tol_colour = None
+    if tol is not None:
+        tol_colour = next((c for c, t in RES_TOL.items() if t == tol), None)
+        if tol_colour is None:
+            raise ValueError(f"No band for ±{_num(tol)}%. Try 1%, 2%, 5% or 10%")
+    codes = []
+    for count, default in ((2, "gold"), (3, "brown")):
+        bands = _colour_bands(ohms, count)
+        if bands:
+            codes.append(bands + [tol_colour or default])
+    if not codes:
+        raise ValueError(f"{_res_value(ohms)} has no colour code (0.1 Ω to 999 GΩ, 3 figures)")
+
+    def text(names: bool) -> str:
+        label = (lambda b: "") if USE_EMOJI else (lambda b: f"{len(b)}-band ")   # the squares show the count
+        parts = [f"{label(b)}{_bands_text(b, names)} ±{_num(RES_TOL[b[-1]])}%" for b in codes]
+        return f"{_res_value(ohms)}: " + " | ".join(parts)
+
+    full = text(names=True)
+    budget = MAX_REPLY_BYTES if budget is None else budget
+    return full if len(full.encode("utf-8")) <= budget else text(names=False)
+
+
+def resistor(arg: str, budget: Optional[int] = None) -> str:
+    """!res yellow violet red gold -> value, !res 4k7 [5%] -> colours."""
+    tokens = re.split(r"[\s,/-]+", arg.strip().lower())
+    tokens = [t for t in tokens if t]
+    if not tokens:
+        return RES_USAGE
+    colours = [_res_colour(t) for t in tokens]
+    try:
+        if colours[0] in RES_MULT or colours[0] in RES_TOL:
+            unknown = next((t for t, c in zip(tokens, colours) if c not in RES_MULT and c not in RES_TOL), "")
+            if unknown:
+                return f"Unknown colour '{unknown[:12]}'. See !helpconv"
+            text = resistor_from_colours(colours)
+        else:
+            tol = None
+            if len(tokens) > 1 and RES_TOL_RE.match(tokens[-1]):
+                tol = float(RES_TOL_RE.match(tokens.pop())[1])
+            text = resistor_to_colours("".join(tokens), tol, budget)
+    except ValueError as e:
+        return str(e)
+    return text
 
 
 async def run_command(cmd: str, arg: str, sender_name: str, rx_info: dict[str, Any],
@@ -2474,6 +2691,10 @@ async def run_command(cmd: str, arg: str, sender_name: str, rx_info: dict[str, A
         return help_text(cmd[5:] or arg)
     if cmd == "!conv":
         return mention + convert_units(arg)
+    if cmd == "!ohm":
+        return mention + ohms_law(arg)
+    if cmd == "!res":
+        return mention + resistor(arg, budget=MAX_REPLY_BYTES - len(mention.encode("utf-8")))
     if cmd == "!roll":
         return mention + roll_dice(arg)
     if cmd == "!flipacoin":

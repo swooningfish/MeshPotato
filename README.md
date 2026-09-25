@@ -83,7 +83,7 @@ Send commands in a channel the bot listens on (channels 1 and 3 by default), or 
 1. `ping` and `test` must be the **whole message**. The `!` is optional. "ping me later" is ignored.
 2. Every other command **starts with `!`**. Ordinary chat that happens to start with "wx" or "help" doesn't trigger anything.
 
-Send `!help` on the mesh for the list of help topics, then `!helptest`, `!helpwx`, `!helpradio` or `!helpfun` for the commands in each. `!help wx` works too.
+Send `!help` on the mesh for the list of help topics, then `!helptest`, `!helpwx`, `!helpradio`, `!helpfun` or `!helpconv` for the commands in each. `!help wx` works too.
 
 ### Command cheat sheet
 
@@ -109,7 +109,9 @@ Send `!help` on the mesh for the list of help topics, then `!helptest`, `!helpwx
 | `!flipacoin` | Heads or tails |
 | `!eightball <question>` | Magic eight ball |
 | `!conv <n> <unit> [unit]` | Unit conversion, such as `!conv 10 mi km` |
-| `!help [topic]` | Help topics: `!helptest`, `!helpwx`, `!helpradio`, `!helpfun` |
+| `!ohm <two values>` | Ohm's law and power, such as `!ohm 12v 2a` |
+| `!res <colours or value>` | Resistor colour code, such as `!res yellow violet red gold` or `!res 4k7` |
+| `!help [topic]` | Help topics: `!helptest`, `!helpwx`, `!helpradio`, `!helpfun`, `!helpconv` |
 
 `[place]` is optional. Leave it out to use the bot's default location. It can be:
 
@@ -809,6 +811,49 @@ Aliases: `!convert` and `!units` = `!conv`.
 | Frequency | `Hz`, `kHz`, `MHz`, `GHz` |
 
 Unit names are not case sensitive.
+
+### Ohm's law and power (!ohm)
+
+Give any two of voltage, current, resistance and power, and the bot works out the other two using V = I × R and P = V × I.
+
+| Command | Reply |
+|---------|-------|
+| `!ohm 12v 2a` | `⚡ 12 V, 2 A → 6 Ω, 24 W` |
+| `!ohm 5v 220r` | `⚡ 5 V, 220 Ω → 22.73 mA, 113.6 mW` |
+| `!ohm 100w 13.8v` | `⚡ 13.8 V, 100 W → 7.246 A, 1.904 Ω` |
+| `!ohm 4.7k 20ma` | `⚡ 20 mA, 4.7 kΩ → 94 V, 1.88 W` |
+| `!ohm 2a 50w` | `⚡ 2 A, 50 W → 25 V, 12.5 Ω` |
+| `!ohm 10w 50ohm` | `⚡ 50 Ω, 10 W → 22.36 V, 447.2 mA` |
+
+Aliases: `!ohms`, `!vir` and `!ohmslaw` = `!ohm`.
+
+- Units: `v`, `a`, `w`, and `ohm`, `r` or `Ω` for resistance. A space between the number and unit is optional.
+- Prefixes: `u` or `µ` (micro), `m` (milli), `k` (kilo), `M` (mega). `M` and `m` are case sensitive: `1M` is 1 MΩ, `20mA` is 20 mA.
+- A number with only a prefix is a resistance: `4.7k` = 4.7 kΩ.
+- Values must be above 0. Replies use the nearest prefix and about 4 significant figures.
+
+### Resistor colour code (!res)
+
+Give the colours to get the value, or the value to get the colours.
+
+| Command | Reply |
+|---------|-------|
+| `!res yellow violet red gold` | `🟨🟪🟥🥇 Yellow Violet Red Gold = 4.7 kΩ ±5%` |
+| `!res brown black red` | `🟫⬛🟥 Brown Black Red = 1 kΩ ±20%` |
+| `!res brown black black brown brown red` | `🟫⬛⬛🟫🟫🟥 Brown Black Black Brown Brown Red = 1 kΩ ±1% 50ppm/K` |
+| `!res 4k7` | `4.7 kΩ: 🟨🟪🟥🥇 Yellow Violet Red Gold ±5% \| 🟨🟪⬛🟫🟫 Yellow Violet Black Brown Brown ±1%` |
+| `!res 10k 1%` | `10 kΩ: 🟫⬛🟧🟫 Brown Black Orange Brown ±1% \| 🟫⬛⬛🟥🟫 Brown Black Black Red Brown ±1%` |
+| `!res 4.99k` | `4.99 kΩ: 🟨⬜⬜🟫🟫 Yellow White White Brown Brown ±1%` |
+
+Aliases: `!resistor`, `!colour` and `!color` = `!res`.
+
+- **Colours to value:** 3 bands (two digits and a multiplier, ±20%), 4 bands (plus tolerance), 5 bands (three digits, multiplier, tolerance) or 6 bands (plus temperature coefficient). Spaces, commas or hyphens between colours all work.
+- If the first band is gold or silver, the bot reads the bands the other way round.
+- Colour names: `black`, `brown`, `red`, `orange`, `yellow`, `green`, `blue`, `violet` (`purple`), `grey` (`gray`), `white`, `gold`, `silver`. Short codes such as `bn`, `bk`, `rd` and `gd` work too.
+- **Value to colours:** give ohms as `470`, `470r`, `4.7k`, `4k7`, `4r7`, `1M` or `220 ohm`. `m` and `M` both mean mega here. The bot shows the 4-band code with a gold (±5%) band and the 5-band code with a brown (±1%) band. Add a tolerance such as `1%`, `2%` or `10%` to use that band in both.
+- A value that needs three figures, such as 4.99 kΩ, only has a 5-band code. Colour codes cover 0.1 Ω to 999 GΩ.
+- Each code is shown as coloured squares with the names after them. Grey, gold and silver have no coloured square, so they show as 🩶, 🥇 and 🥈. If both codes and names don't fit in one message, the names are left out. With `use_emoji = false` the reply has names only, with `4-band` and `5-band` labels.
+- Bands follow IEC 60062.
 
 ### Admin commands
 

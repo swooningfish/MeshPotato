@@ -32,6 +32,11 @@ import run_bot as bot
     ("!conv 10 mi km", ("!conv", "10 mi km")),
     ("!convert 20 c", ("!conv", "20 c")),
     ("conv 10 mi km", ("", "")),
+    ("!ohm 12v 2a", ("!ohm", "12v 2a")),
+    ("!vir 5v 220r", ("!ohm", "5v 220r")),
+    ("!res 4k7", ("!res", "4k7")),
+    ("!resistor brown black red", ("!res", "brown black red")),
+    ("!helpconv", ("!helpconv", "")),
     ("!dice 2d6", ("!roll", "2d6")),
     ("!8ball will it rain", ("!eightball", "will it rain")),
     ("!coin", ("!flipacoin", "")),
@@ -557,7 +562,9 @@ def test_help_fits_one_message(monkeypatch):
 def test_help_topics(monkeypatch):
     monkeypatch.setattr(bot, "MET_OFFICE_API_KEY", "key")
     assert "!path" in bot.help_text("test")
-    assert "!conv" in bot.help_text("fun") and "!roll" in bot.help_text("fun")
+    assert "!roll" in bot.help_text("fun")
+    for cmd in ("!conv", "!ohm", "!res"):
+        assert cmd in bot.help_text("conv")
     assert "!hf" in bot.help_text("radio")
     # !helpwx and !help wx give the same reply, an unknown topic gives the topic list
     assert asyncio.run(bot.run_command("!helpwx", "", "Alice", {})) == bot.help_text("wx")
@@ -599,6 +606,78 @@ def test_convert_units_errors(monkeypatch):
     assert bot.convert_units("0 w dbm").startswith("Can't convert")
     monkeypatch.setattr(bot, "USE_EMOJI", False)
     assert asyncio.run(bot.run_command("!conv", "10 mi km", "Alice", {})) == "@[Alice] 10 mi = 16.09 km"
+
+
+@pytest.mark.parametrize("arg, expected", [
+    ("12v 2a", "⚡ 12 V, 2 A → 6 Ω, 24 W"),                       # V and I
+    ("12 V 2 A", "⚡ 12 V, 2 A → 6 Ω, 24 W"),
+    ("5v 220r", "⚡ 5 V, 220 Ω → 22.73 mA, 113.6 mW"),            # V and R
+    ("100w 13.8v", "⚡ 13.8 V, 100 W → 7.246 A, 1.904 Ω"),        # V and P
+    ("4.7k 20ma", "⚡ 20 mA, 4.7 kΩ → 94 V, 1.88 W"),             # I and R, bare k is ohms
+    ("2a 50w", "⚡ 2 A, 50 W → 25 V, 12.5 Ω"),                    # I and P
+    ("10w 50ohm", "⚡ 50 Ω, 10 W → 22.36 V, 447.2 mA"),           # R and P
+    ("1M 10v", "⚡ 10 V, 1 MΩ → 10 µA, 100 µW"),                  # M is mega, m is milli
+    ("9v 1kΩ", "⚡ 9 V, 1 kΩ → 9 mA, 81 mW"),
+    ("5 volts 100 mA", "⚡ 5 V, 100 mA → 50 Ω, 500 mW"),
+])
+def test_ohms_law(arg, expected):
+    assert bot.ohms_law(arg) == expected
+
+
+@pytest.mark.parametrize("arg, expected", [
+    ("yellow violet red gold", "🟨🟪🟥🥇 Yellow Violet Red Gold = 4.7 kΩ ±5%"),
+    ("gold red violet yellow", "🟨🟪🟥🥇 Yellow Violet Red Gold = 4.7 kΩ ±5%"),      # read from the wrong end
+    ("bn bk rd gd", "🟫⬛🟥🥇 Brown Black Red Gold = 1 kΩ ±5%"),
+    ("brown, black, red", "🟫⬛🟥 Brown Black Red = 1 kΩ ±20%"),                   # 3 bands
+    ("brown black black brown brown", "🟫⬛⬛🟫🟫 Brown Black Black Brown Brown = 1 kΩ ±1%"),
+    ("brown black black brown brown red", "🟫⬛⬛🟫🟫🟥 Brown Black Black Brown Brown Red = 1 kΩ ±1% 50ppm/K"),
+    ("purple green silver gold", "🟪🟩🥈🥇 Violet Green Silver Gold = 0.75 Ω ±5%"),
+    ("black", "⬛ Black = 0 Ω zero-ohm link"),
+    ("4k7", "4.7 kΩ: 🟨🟪🟥🥇 Yellow Violet Red Gold ±5% | 🟨🟪⬛🟫🟫 Yellow Violet Black Brown Brown ±1%"),
+    ("4.7 k", "4.7 kΩ: 🟨🟪🟥🥇 Yellow Violet Red Gold ±5% | 🟨🟪⬛🟫🟫 Yellow Violet Black Brown Brown ±1%"),
+    ("4r7", "4.7 Ω: 🟨🟪🥇🥇 Yellow Violet Gold Gold ±5% | 🟨🟪⬛🥈🟫 Yellow Violet Black Silver Brown ±1%"),
+    ("220 ohm", "220 Ω: 🟥🟥🟫🥇 Red Red Brown Gold ±5% | 🟥🟥⬛⬛🟫 Red Red Black Black Brown ±1%"),
+    ("10k 1%", "10 kΩ: 🟫⬛🟧🟫 Brown Black Orange Brown ±1% | 🟫⬛⬛🟥🟫 Brown Black Black Red Brown ±1%"),
+    ("1M", "1 MΩ: 🟫⬛🟩🥇 Brown Black Green Gold ±5% | 🟫⬛⬛🟨🟫 Brown Black Black Yellow Brown ±1%"),
+    ("4.99k", "4.99 kΩ: 🟨⬜⬜🟫🟫 Yellow White White Brown Brown ±1%"),              # needs 3 figures
+    ("0.47", "0.47 Ω: 🟨🟪🥈🥇 Yellow Violet Silver Gold ±5%"),
+    ("0", "0 Ω: ⬛ Black (zero-ohm link)"),
+])
+def test_resistor(arg, expected):
+    assert bot.resistor(arg) == expected
+
+
+def test_resistor_errors(monkeypatch):
+    for arg in ("", "hello", "4.7x"):
+        assert bot.resistor(arg).startswith("Use !res")
+    assert bot.resistor("red red pink") == "Unknown colour 'pink'. See !helpconv"
+    assert bot.resistor("red red") == "Give 3 to 6 bands, e.g. !res brown black red gold"
+    assert bot.resistor("gold gold red gold") == "Gold Gold: digit bands can't be gold or silver"
+    assert bot.resistor("red red white white") == "White isn't a tolerance band"
+    assert bot.resistor("10k 3%") == "No band for ±3%. Try 1%, 2%, 5% or 10%"
+    assert bot.resistor("4991").endswith("has no colour code (0.1 Ω to 999 GΩ, 3 figures)")
+    assert bot.resistor("0.05").startswith("0.05 Ω has no colour code")
+    monkeypatch.setattr(bot, "USE_EMOJI", False)
+    assert asyncio.run(bot.run_command("!res", "brown black red gold", "Alice", {})) == \
+        "@[Alice] Brown Black Red Gold = 1 kΩ ±5%"
+    assert bot.resistor("4k7") == "4.7 kΩ: 4-band Yellow Violet Red Gold ±5% | 5-band Yellow Violet Black Brown Brown ±1%"
+
+
+def test_resistor_drops_names_to_fit():
+    full = "1.5 MΩ: 🟫🟩🟩🥈 Brown Green Green Silver ±10% | 🟫🟩⬛🟨🥈 Brown Green Black Yellow Silver ±10%"
+    assert bot.resistor("1.5M 10%") == full
+    assert bot.resistor("1.5M 10%", budget=100) == "1.5 MΩ: 🟫🟩🟩🥈 ±10% | 🟫🟩⬛🟨🥈 ±10%"
+
+
+def test_ohms_law_errors(monkeypatch):
+    for arg in ("", "12v", "hello", "12v and 2a", "1v 2a 3r"):
+        assert bot.ohms_law(arg).startswith("Use !ohm")
+    assert bot.ohms_law("12v 3v") == "Give two different values, such as volts and amps"
+    assert bot.ohms_law("12v 0a") == "Values must be above 0"
+    assert bot.ohms_law("12v 2x") == "Unknown unit 'x'. See !helpconv"
+    assert bot.ohms_law("12 2a") == "Give each value a unit: V, A, Ω or W"
+    monkeypatch.setattr(bot, "USE_EMOJI", False)
+    assert asyncio.run(bot.run_command("!ohm", "12v 2a", "Alice", {})) == "@[Alice] 12 V, 2 A -> 6 Ω, 24 W"
 
 
 # ---------- commands ----------
