@@ -457,7 +457,7 @@ To see every message the bot hears, set `log_level = "DEBUG"` in `config.toml`, 
 | Command | Reply |
 |---------|-------|
 | `ping` | `@[You] 🏓 Pong (2 hops)` |
-| `test` | `@[You] 📍 RX in Norwich \| 🐸 (2 hops) 〰️ SNR 7.5dB 📶 RSSI -85dBm \| 📏 34km` |
+| `test` | `@[You] 📡 RX in Norwich \| 🐸 (2 hops) 📶 SNR 7.5dB 〰️ RSSI -85dBm \| 📏 34km` |
 
 `test` gives where the bot heard you (`default_location`), the hop count, the signal report and how far away you are.
 
@@ -466,10 +466,10 @@ To see every message the bot hears, set `log_level = "DEBUG"` in `config.toml`, 
 
 | Emoji | Meaning |
 |-------|---------|
-| 📍 | Where the bot heard you |
+| 📡 | Where the bot heard you |
 | 🐸 | Hops: how many repeaters your message jumped through |
-| 〰️ | SNR, signal-to-noise ratio: how clearly the signal stood out from the noise |
-| 📶 | RSSI, received signal strength |
+| 📶 | SNR, signal-to-noise ratio: how clearly the signal stood out from the noise |
+| 〰️ | RSSI, received signal strength |
 | 📏 | Straight-line distance from you to the bot |
 
 With `use_emoji = false` the reply is plain text: `RX in Norwich | (2 hops) SNR 7.5dB RSSI -85dBm | 34km`.

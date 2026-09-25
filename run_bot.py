@@ -421,10 +421,10 @@ def format_hops(info: dict[str, Any]) -> str:
 
 
 def format_rx_report(info: dict[str, Any]) -> str:
-    """test: '🐸 (2 hops) 〰️ SNR 7.5dB 📶 RSSI -85dBm', plain '(2 hops) SNR 7.5dB RSSI -85dBm'.
+    """test: '🐸 (2 hops) 📶 SNR 7.5dB 〰️ RSSI -85dBm', plain '(2 hops) SNR 7.5dB RSSI -85dBm'.
     The path addresses are left out, because a long path pushes the reply past MAX_REPLY_BYTES."""
     parts = [("🐸 " if USE_EMOJI else "") + format_hops(info)]
-    snr, rssi = ("〰️ SNR", "📶 RSSI") if USE_EMOJI else ("SNR", "RSSI")
+    snr, rssi = ("📶 SNR", "〰️ RSSI") if USE_EMOJI else ("SNR", "RSSI")
     if info.get("snr") is not None:
         parts.append(f"{snr} {info['snr']:g}dB")
     if info.get("rssi") is not None:
@@ -2309,9 +2309,9 @@ async def run_command(cmd: str, arg: str, sender_name: str, rx_info: dict[str, A
     contacts = getattr(_radio, "contacts", None) or {}
     dm_key = target[1] if target and target[0] == "dm" else ""
     if cmd == "test":
-        # '@[Alice] 📍 RX in Norwich | 🐸 (2 hops) 〰️ SNR 7.5dB 📶 RSSI -85dBm | 📏 34km'
-        pin, ruler = ("📍 ", "📏 ") if USE_EMOJI else ("", "")
-        parts = [f"{pin}RX in {DEFAULT_LOCATION.strip()}" if DEFAULT_LOCATION.strip() else "Test OK",
+        # '@[Alice] 📡 RX in Norwich | 🐸 (2 hops) 📶 SNR 7.5dB 〰️ RSSI -85dBm | 📏 34km'
+        dish, ruler = ("📡 ", "📏 ") if USE_EMOJI else ("", "")
+        parts = [f"{dish}RX in {DEFAULT_LOCATION.strip()}" if DEFAULT_LOCATION.strip() else "Test OK",
                  format_rx_report(rx_info)]
         start, end = sender_position(contacts, name=sender_name, key_prefix=dm_key), bot_position()
         if start and end:
