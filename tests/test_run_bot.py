@@ -49,6 +49,15 @@ import run_bot as bot
     ("!uptime", ("!uptime", "")),
     ("!mute 30", ("!mute", "30")),
     ("!say 1 Net starts 20:00", ("!say", "1 Net starts 20:00")),
+    ("!who", ("!who", "")),
+    ("!heard 2", ("!who", "2")),
+    ("!status Alice", ("!status", "Alice")),
+    ("!seen bob", ("!status", "bob")),
+    ("!bearing Alice", ("!bearing", "Alice")),
+    ("!brg NR1", ("!bearing", "NR1")),
+    ("!freq pmr", ("!freq", "pmr")),
+    ("!helpnet", ("!helpnet", "")),
+    ("who", ("", "")),
     ("!nothing", ("", "")),
     ("", ("", "")),
 ])
@@ -528,6 +537,165 @@ def test_format_dist_fits_budget():
     assert len(out.encode("utf-8")) <= 70 and out.startswith("📏 8 hops: ") and "direct" in out
 
 
+# ---------- !bearing ----------
+def test_initial_bearing():
+    assert bot.initial_bearing(NORWICH, CROMER) == pytest.approx(0.4, abs=0.5)        # almost due north
+    assert bot.initial_bearing(CROMER, NORWICH) == pytest.approx(180.4, abs=0.5)
+    assert bot.initial_bearing((52.0, 1.0), (52.0, 1.5)) == pytest.approx(90, abs=0.5)
+
+
+def test_bearing_to_contact(monkeypatch):
+    monkeypatch.setattr(bot, "_radio", type("Radio", (), {"self_info": {}})())
+    monkeypatch.setattr(bot, "LOCATIONS", {"Norwich": NORWICH})
+    monkeypatch.setattr(bot, "DEFAULT_LOCATION", "Norwich")
+    # From the sender when their position is known, else from the bot
+    assert asyncio.run(bot.get_bearing("aylsham", GPS_CONTACTS, CROMER)) == "🧭 Aylsham RPT: 15km S (192°) from you"
+    assert asyncio.run(bot.get_bearing("Alice", GPS_CONTACTS, None)) == "🧭 Alice: 34km N (0°) from the bot"
+    assert asyncio.run(bot.get_bearing("no gps", GPS_CONTACTS, CROMER)) == "🧭 No GPS RPT doesn't share a position"
+    assert asyncio.run(bot.get_bearing("alice", GPS_CONTACTS, CROMER)) == "🧭 Alice is right by you"
+    assert asyncio.run(bot.get_bearing("rpt", GPS_CONTACTS, CROMER)).startswith("🧭 3 contacts match 'rpt': ")
+    assert asyncio.run(bot.get_bearing("", GPS_CONTACTS, CROMER)).startswith("🧭 Use !bearing")
+
+
+def test_bearing_to_place(monkeypatch):
+    monkeypatch.setattr(bot, "LOCATIONS", {"Norwich": NORWICH})
+    # Not a contact, so it is looked up as a place: saved names and lat,lon work offline
+    assert asyncio.run(bot.get_bearing("norwich", GPS_CONTACTS, CROMER)) == "🧭 Norwich: 34km S (180°) from you"
+    assert asyncio.run(bot.get_bearing("52.93,1.50", {}, CROMER)) == "🧭 52.93,1.50: 13km E (90°) from you"
+
+    def not_found(q):
+        raise bot.LocationError("not found")
+    monkeypatch.setattr(bot, "_geocode_sync", not_found)
+    assert asyncio.run(bot.get_bearing("Atlantis", GPS_CONTACTS, CROMER)) == "🧭 No contact or place called 'Atlantis'"
+
+    def offline(q):
+        raise OSError("no network")
+    monkeypatch.setattr(bot, "_geocode_sync", offline)
+    assert asyncio.run(bot.get_bearing("Cromer", {}, CROMER)) == "🧭 'Cromer' isn't a contact and the place lookup failed"
+
+
+def test_bearing_command_uses_dm_sender_position(monkeypatch):
+    monkeypatch.setattr(bot, "_radio", type("Radio", (), {"contacts": GPS_CONTACTS, "self_info": {}})())
+    out = asyncio.run(bot.run_command("!bearing", "hellesdon", "", {}, ("dm", "d4dd00")))
+    assert out == "🧭 Hellesdon RPT: 30km S (187°) from you"
+
+
+# ---------- !who and !status ----------
+HEARD_NOW = 1_800_000_000.0
+
+
+def _heard():
+    h = bot.Heard()
+    h.record("Alice", "ch1", {"path_len": 2, "snr": 7.5}, now=HEARD_NOW - 120)
+    h.record("Bob", "dm", {"direct": True, "snr": -3.25}, key="B0B0", now=HEARD_NOW - 3 * 3600)
+    h.record("Aylsham RPT", "advert", key="a1ff00", repeater=True, now=HEARD_NOW - 600)
+    h.record("Carol", "advert", now=HEARD_NOW - 30 * 3600)
+    return h
+
+
+def test_heard_record_keeps_key():
+    h = _heard()
+    h.record("bob", "ch3", {"path_len": 1}, now=HEARD_NOW)
+    assert h.nodes["bob"] == {"name": "bob", "at": HEARD_NOW, "via": "ch3", "key": "b0b0", "path_len": 1}
+    h.record("  ", "ch1")
+    assert len(h.nodes) == 4
+
+
+def test_format_who():
+    h = _heard()
+    assert bot.format_who(h, now=HEARD_NOW) == "👥 2 heard in 24h: Alice 2m, Bob 3h"
+    assert bot.format_who(h, "48", now=HEARD_NOW) == "👥 3 heard in 48h: Alice 2m, Bob 3h, Carol 30h"
+    assert bot.format_who(h, "1h", now=HEARD_NOW) == "👥 1 heard in 1h: Alice 2m"
+    assert bot.format_who(h, "rpt", now=HEARD_NOW) == "👥 1 repeater heard in 24h: Aylsham RPT 10m"
+    assert bot.format_who(bot.Heard(), now=HEARD_NOW) == "👥 No people heard in the last 24h"
+
+
+def test_format_who_fits_budget():
+    h = bot.Heard()
+    for i in range(30):
+        h.record(f"Node number {i:02d}", "ch1", now=HEARD_NOW - i * 60)
+    out = bot.format_who(h, now=HEARD_NOW, budget=80)
+    assert len(out.encode("utf-8")) <= 80 and out.startswith("👥 30 heard in 24h: Node number 0s")
+    assert out.endswith(" more")
+
+
+def test_format_status():
+    h = _heard()
+    assert bot.format_status("alice", h, GPS_CONTACTS, NORWICH, now=HEARD_NOW) == \
+        "👤 Alice: heard 2m ago on ch1, 2 hops, SNR 7.5dB | 📍 34km N of bot"
+    assert bot.format_status("bob", h, {}, NORWICH, now=HEARD_NOW) == \
+        "👤 Bob: heard 3h ago by DM, direct route, SNR -3.25dB"
+    # Found by key, so the position shows
+    assert bot.format_status("aylsham", h, GPS_CONTACTS, NORWICH, now=HEARD_NOW) == \
+        "👤 Aylsham RPT: heard 10m ago by advert | 📍 19km N of bot"
+    assert bot.format_status("a", h, {}, NORWICH, now=HEARD_NOW).startswith("👤 2 match 'a': ")
+    assert bot.format_status("nobody", h, GPS_CONTACTS, NORWICH, now=HEARD_NOW) == "👤 No one called 'nobody' heard"
+    assert bot.format_status("", h, {}, NORWICH, now=HEARD_NOW).startswith("👤 Use !status")
+
+
+def test_format_status_from_contact_advert():
+    contacts = {"x": {"public_key": "e5e5", "adv_name": "Dave", "type": 1, "last_advert": HEARD_NOW - 7200},
+                "y": {"public_key": "f6f6", "adv_name": "Eve", "type": 1, "last_advert": HEARD_NOW + 999999}}
+    assert bot.format_status("dave", bot.Heard(), contacts, NORWICH, now=HEARD_NOW) == "👤 Dave: last advert 2h ago"
+    # A node with a wrong clock sends an advert time in the future
+    assert bot.format_status("eve", bot.Heard(), contacts, NORWICH, now=HEARD_NOW) == "👤 Eve: in contacts, not heard yet"
+
+
+def test_heard_save_load_prune(tmp_path, monkeypatch):
+    path = str(tmp_path / "heard.json")
+    h = _heard()
+    h.save(path)
+    assert not h.dirty
+    loaded = bot.Heard()
+    loaded.load(path)
+    assert loaded.nodes == h.nodes
+    monkeypatch.setattr(bot, "HEARD_KEEP_DAYS", 1)
+    loaded.prune(now=HEARD_NOW)
+    assert set(loaded.nodes) == {"alice", "bob", "aylsham rpt"}
+    (tmp_path / "bad.json").write_text("not json", encoding="utf-8")
+    broken = bot.Heard()
+    broken.load(str(tmp_path / "bad.json"))
+    broken.load(str(tmp_path / "missing.json"))
+    assert broken.nodes == {}
+
+
+def test_who_and_status_commands(monkeypatch):
+    monkeypatch.setattr(bot, "_radio", type("Radio", (), {"contacts": {}, "self_info": {}})())
+    h = bot.Heard()
+    h.record("Alice", "ch1", {"path_len": 1})
+    monkeypatch.setattr(bot, "_heard", h)
+    assert asyncio.run(bot.run_command("!who", "", "Bob", {})) == "@[Bob] 👥 1 heard in 24h: Alice 0s"
+    assert asyncio.run(bot.run_command("!status", "alice", "Bob", {})) == "@[Bob] 👤 Alice: heard 0s ago on ch1, 1 hop"
+
+
+# ---------- !freq ----------
+def test_format_freq(monkeypatch):
+    assert bot.format_freq("pmr").startswith("📻 PMR446 MHz: 1 446.00625")
+    assert bot.format_freq("PMR446") == bot.format_freq("pmr")
+    assert bot.format_freq("") == "📻 Frequencies: !freq pmr, cb, ham, hf, marine, air, mesh"
+    assert bot.format_freq("nonsense") == bot.format_freq("")
+    info = {"radio_freq": 869.618, "radio_bw": 62.5, "radio_sf": 8, "radio_cr": 8}
+    assert bot.format_freq("mesh", info) == "📻 MeshCore here: 869.618 MHz, BW 62.5kHz, SF8, CR8"
+    assert bot.format_freq("lora", {}) == "📻 MeshCore radio settings not known"
+    monkeypatch.setattr(bot, "USE_EMOJI", False)
+    assert bot.format_freq("air") == "Air band: 121.500 MHz distress (guard)"
+
+
+def test_freq_lists_fit_one_message():
+    for topic in bot.FREQ_LISTS:
+        text = bot.format_freq(topic)
+        assert len(text.encode("utf-8")) <= bot.MAX_REPLY_BYTES - len("@[Somebody] "), topic
+
+
+@pytest.mark.skipif(bot.tomllib is None, reason="needs Python 3.11+")
+def test_freq_lists_from_config(tmp_path, restore_settings):
+    path = tmp_path / "config.toml"
+    path.write_text('[freq_lists]\nlocal = "GB3XX 145.7250"\nair = ""\n', encoding="utf-8")
+    bot.load_config(str(path))
+    assert bot.FREQ_LISTS["local"] == "GB3XX 145.7250"
+    assert "air" not in bot.FREQ_LISTS and "pmr" in bot.FREQ_LISTS
+
+
 def test_format_dist_without_positions(monkeypatch):
     assert bot.format_dist({"path_len": 1, "path_nodes": ["ee"]}, {}, None, None) == \
         "📏 1 hop, no positions known along the path"
@@ -566,6 +734,8 @@ def test_help_topics(monkeypatch):
     for cmd in ("!conv", "!ohm", "!res"):
         assert cmd in bot.help_text("conv")
     assert "!hf" in bot.help_text("radio")
+    for cmd in ("!who", "!status", "!bearing", "!freq"):
+        assert cmd in bot.help_text("net")
     # !helpwx and !help wx give the same reply, an unknown topic gives the topic list
     assert asyncio.run(bot.run_command("!helpwx", "", "Alice", {})) == bot.help_text("wx")
     assert asyncio.run(bot.run_command("!help", "wx", "Alice", {})) == bot.help_text("wx")

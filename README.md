@@ -5,6 +5,7 @@ MeshPotato is a chat bot for a [MeshCore](https://github.com/meshcore-dev) mesh 
 What it can do:
 
 - 🏓 **Signal checks:** `ping`, `test` and `!path` show hops, SNR, RSSI and the repeaters your message went through
+- 👥 **Who's about:** `!who`, `!status`, `!bearing` and `!freq` show who the bot has heard, where they are and which frequencies to try. They work without internet
 - 🌦️ **Weather:** current weather, hourly outlook and 3-day forecast from the Met Office, plus weather warnings with automatic change alerts
 - 🌅 **Sky:** sunrise, sunset, moon phase and aurora alerts
 - 🌼 **Air:** air quality and pollen forecasts
@@ -83,7 +84,7 @@ Send commands in a channel the bot listens on (channels 1 and 3 by default), or 
 1. `ping` and `test` must be the **whole message**. The `!` is optional. "ping me later" is ignored.
 2. Every other command **starts with `!`**. Ordinary chat that happens to start with "wx" or "help" doesn't trigger anything.
 
-Send `!help` on the mesh for the list of help topics, then `!helptest`, `!helpwx`, `!helpradio`, `!helpfun` or `!helpconv` for the commands in each. `!help wx` works too.
+Send `!help` on the mesh for the list of help topics, then `!helptest`, `!helpnet`, `!helpwx`, `!helpradio`, `!helpfun` or `!helpconv` for the commands in each. `!help wx` works too.
 
 ### Command cheat sheet
 
@@ -93,6 +94,10 @@ Send `!help` on the mesh for the list of help topics, then `!helptest`, `!helpwx
 | `test` | Where the bot heard you, hops, SNR, RSSI and your distance |
 | `!path` | The repeaters your message came through |
 | `!dist` | Distance of each leg along that path |
+| `!who [hours or rpt]` | People (or repeaters) the bot has heard lately |
+| `!status <name>` | When the bot last heard someone, and where they are |
+| `!bearing <name or place>` | Distance and compass direction to a contact or place |
+| `!freq [topic]` | Frequency lists: PMR446, CB, ham, HF emergency, marine, air band, this mesh |
 | `!wx [place]` | Current weather |
 | `!wxh [place]` | Hour-by-hour outlook |
 | `!wxf [place]` | 3-day forecast |
@@ -111,7 +116,7 @@ Send `!help` on the mesh for the list of help topics, then `!helptest`, `!helpwx
 | `!conv <n> <unit> [unit]` | Unit conversion, such as `!conv 10 mi km` |
 | `!ohm <two values>` | Ohm's law and power, such as `!ohm 12v 2a` |
 | `!res <colours or value>` | Resistor colour code, such as `!res yellow violet red gold` or `!res 4k7` |
-| `!help [topic]` | Help topics: `!helptest`, `!helpwx`, `!helpradio`, `!helpfun`, `!helpconv` |
+| `!help [topic]` | Help topics: `!helptest`, `!helpnet`, `!helpwx`, `!helpradio`, `!helpfun`, `!helpconv` |
 
 `[place]` is optional. Leave it out to use the bot's default location. It can be:
 
@@ -123,7 +128,7 @@ Send `!help` on the mesh for the list of help topics, then `!helptest`, `!helpwx
 | A UK town or village | `!wx Cromer` |
 | Latitude,longitude | `!wx 52.63,1.30` |
 
-Admins also get `!mute`, `!unmute`, `!say`, `!stats` and `!uptime`, in direct messages only. See [Admin commands](#admin-commands).
+Admins also get `!mute`, `!unmute`, `!say`, `!save`, `!stats` and `!uptime`, in direct messages only. See [Admin commands](#admin-commands).
 
 Full details, example replies and what every emoji means are in the [Command reference](#command-reference).
 
@@ -520,6 +525,70 @@ Where positions come from:
 
 A node only has a position if its owner has set one and it is included in its adverts. Many companions and some repeaters leave it out. MeshCore sends 0,0 for "no position", which the bot treats as unknown. Distances are straight lines between the advertised points, not the path the radio waves took.
 
+### Who's about (!who, !status)
+
+| Command | Reply |
+|---------|-------|
+| `!who` | `@[You] 👥 4 heard in 24h: Alice 2m, Bob 15m, Carol 3h, Dave 20h` |
+| `!who 2` | Only people heard in the last 2 hours |
+| `!who rpt` | `@[You] 👥 2 repeaters heard in 24h: Aylsham RPT 10m, Hill Top 4h` |
+| `!status alice` | `@[You] 👤 Alice: heard 2m ago on ch1, 2 hops, SNR 7.5dB \| 📍 34km N of bot` |
+| `!status dave` | `@[You] 👤 Dave: last advert 2h ago` |
+
+Aliases: `!heard` = `!who`, `!seen` and `!lastheard` = `!status`.
+
+The bot keeps a list of every node it hears:
+
+- **Messages** on the channels it listens to, from the sender's name, with the hops and SNR.
+- **DMs** to the bot, when the sender is in the bot's contacts.
+- **Adverts** from companions and repeaters in the bot's contacts. `!who` lists people. `!who rpt` lists repeaters, which is a quick way to see which parts of the mesh are still up.
+
+Notes:
+
+- `!status` matches the whole name first, then the start of a name, then any part of it. If several match, it lists them.
+- If the bot hasn't heard someone itself, `!status` falls back to the last advert time in its contacts. That time comes from the other node's clock, so treat it as a rough guide.
+- The position is the one in the node's advert, measured from the bot as for `!dist`.
+- The list is kept in memory. To spare the Pi's SD card, `heard.json` next to `run_bot.py` is only read when the bot starts and written when it stops (`systemctl stop` or `restart`, Ctrl+C, or a clean reboot). A power cut or crash loses what was heard since the bot started, so if the power is about to go, an admin can send `!save` to write it straight away. Nodes not heard for 7 days are dropped. See `who_hours`, `heard_keep_days` and `heard_file` in the [Settings reference](#settings-reference).
+- Times use the Pi's clock. Without internet the Pi can't set its clock, so fit a real-time clock or GPS if you rely on this offline.
+
+### Bearing (!bearing)
+
+| Command | Reply |
+|---------|-------|
+| `!bearing alice` | `@[You] 🧭 Alice: 2.3km NE (48°) from you` |
+| `!bearing aylsham` | `@[You] 🧭 Aylsham RPT: 15km S (192°) from you` |
+| `!bearing NR1` | `@[You] 🧭 NR1: 34km S (181°) from you` |
+| `!bearing 52.93,1.50` | `@[You] 🧭 52.93,1.50: 13km E (90°) from you` |
+
+Aliases: `!brg` and `!find` = `!bearing`.
+
+- It measures from **your** advertised position when the bot knows it (as for `!dist`), else from the bot, and says which.
+- The name is looked up in the bot's contacts first, matched the same way as `!status`. If no contact matches, it is looked up as a place, the same as `[place]` for the weather commands.
+- Contact names, `[locations]` names and `lat,lon` work without internet. Postcodes and town names need it.
+- The bearing is the true (not magnetic) compass direction at the start, along the shortest path. In the UK magnetic north is only a degree or two from true north, so a compass reading is close enough.
+
+### Frequencies (!freq)
+
+| Command | Reply |
+|---------|-------|
+| `!freq` | `📻 Frequencies: !freq pmr, cb, ham, hf, marine, air, mesh` |
+| `!freq pmr` | `📻 PMR446 MHz: 1 446.00625, 2 .01875, 3 .03125, …` |
+| `!freq mesh` | `📻 MeshCore here: 869.618 MHz, BW 62.5kHz, SF8, CR8` |
+
+| Topic | What it lists |
+|-------|---------------|
+| `pmr` | PMR446 licence-free handheld channels 1 to 8 |
+| `cb` | UK 27/81 and EU CEPT CB, with the channel 9 emergency channel |
+| `ham` | Amateur FM calling frequencies on 2m, 70cm, 6m and 4m |
+| `hf` | IARU Region 1 HF emergency centres of activity |
+| `marine` | Marine VHF channels 16, 67 and 70 |
+| `air` | 121.500 MHz aviation distress |
+| `mesh` | The bot radio's own frequency and LoRa settings, so others can set their radio to match |
+
+Add your own topics, such as local repeaters or a RAYNET net frequency, with `[freq_lists]` in `config.toml`. See [Settings reference](#settings-reference).
+
+Check these lists against current band plans before you rely on them. Amateur and marine VHF need a licence to transmit, except in a real distress situation.
+
 ### Weather (!wx, !wxh, !wxf)
 
 | Command | Reply |
@@ -865,6 +934,7 @@ These only work in a **direct message** from a key in `admin_pubkeys`. Anyone el
 | `!mute` | Shows whether the bot is muted and for how long |
 | `!mute 0` / `!unmute` | Ends the mute early |
 | `!say <ch> <text>` | Posts the text to a channel slot as the bot: `!say 1 Net starts 20:00` |
+| `!save` | Writes the `!who` / `!status` heard list to `heard.json` now: `💾 Saved 12 nodes to heard.json` |
 | `!stats` | Commands served, messages heard and sent, rate limited commands, Met Office calls today, radio battery |
 | `!uptime` | How long the bot and the Pi have been running |
 
@@ -954,6 +1024,11 @@ The bot reads `config.toml` from the folder `run_bot.py` is in. To use another f
 | `roll_max_dice` | `10` | Most dice per `!roll` |
 | `roll_max_sides` | `1000` | Most sides per die |
 | `eightball_answers` | 19 answers | List of `!eightball` replies |
+| **Who's about and frequencies** | | |
+| `who_hours` | `24` | How far back `!who` looks when no hours are given |
+| `heard_keep_days` | `7` | Forget a node not heard for this many days |
+| `heard_file` | `"heard.json"` | Where the heard list is saved. A relative path is next to `run_bot.py` |
+| `[freq_lists]` | pmr, cb, ham, hf, marine, air | `!freq` topics, such as `local = "GB3XX 145.7250 -600k"`. Adds to the built-in topics or replaces one with the same name. `""` removes one |
 | **Rate limits and admin** | | |
 | `rate_limit_per_user` | `[3, 60]` | [max commands, seconds] |
 | `rate_limit_per_channel` | `[8, 60]` | |
@@ -1081,7 +1156,8 @@ Rules:
 | `config.example.toml` | Example settings. Copy it to `config.toml` |
 | `channel_list.py` | Lists the channels on your radio, with their slot numbers |
 | `tests/` | Tests for the bot, run with pytest |
-| `.gitignore` | Keeps your API key, `config.toml` and Python caches out of git |
+| `heard.json` | Created by the bot: who it has heard, for `!who` and `!status` |
+| `.gitignore` | Keeps your API key, `config.toml`, `heard.json` and Python caches out of git |
 
 ---
 

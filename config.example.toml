@@ -67,12 +67,24 @@
 # rate_limit_notify = true
 # min_tx_gap_sec = 3.0
 # admin_pubkeys = ["a1b2c3d4e5f6"]  # 12-hex-character key prefixes, DMs only.
-#                                   # Skip the limits and can use !stats, !uptime, !mute, !say
+#                                   # Skip the limits and can use !stats, !uptime, !mute, !say, !save
 # mute_max_minutes = 1440           # longest !mute
 
 # ---------- Fun commands ----------
 # roll_max_dice = 10
 # roll_max_sides = 1000
+
+# ---------- Who's about: !who, !status ----------
+# who_hours = 24                    # !who looks back this far unless given hours
+# heard_keep_days = 7               # forget a node not heard for this long
+# heard_file = "heard.json"         # saved heard list, next to run_bot.py unless a full path
+
+# ---------- Frequencies: !freq <topic> ----------
+# Adds topics to the built-in pmr, cb, ham, hf, marine and air, or replaces one with
+# the same name. An empty string removes a topic. Keep each under about 120 characters.
+# [freq_lists]
+# local = "GB3XX 145.7250 -600k CTCSS 94.8"
+# air = ""
 
 # ---------- Scheduled messages ----------
 # Any [[scheduled_messages]] entry replaces the whole built-in list.

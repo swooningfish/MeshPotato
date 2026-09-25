@@ -26,6 +26,7 @@ Commands (channel or direct message):
   !mute <minutes>    -> Stop replies and scheduled messages for a while (admin DMs only)
   !unmute            -> End a mute early (admin DMs only)
   !say <ch> <text>   -> Post text to a channel as the bot (admin DMs only)
+  !save              -> Write the !who / !status heard list to disk now (admin DMs only)
   !help              -> Help topics: !helptest, !helpwx, !helpradio, !helpfun, !helpconv (the ! is required)
   !roll [NdS+M]      -> Roll dice: !roll, !roll d20, !roll 2d6+3
   !flipacoin         -> Heads or tails
@@ -33,6 +34,10 @@ Commands (channel or direct message):
   !conv <n> <unit> [unit] -> Unit conversion: !conv 10 mi km, !conv 20 c, !conv 868 mhz
   !ohm <two of V/A/Ω/W>   -> Ohm's law and power: !ohm 12v 2a, !ohm 5v 220r, !ohm 10w 50ohm
   !res <colours|value>    -> Resistor colour code both ways: !res yellow violet red gold, !res 4k7
+  !who [hours|rpt]        -> People (or repeaters) heard lately, most recent first
+  !status <name>          -> When the bot last heard someone, how, and where they are
+  !bearing <name|place>   -> Distance and compass direction from you (or the bot) to a contact or place
+  !freq [topic]           -> Frequency lists: pmr, cb, ham, hf, marine, air, and mesh (the bot's radio)
 
 [location] accepts:
   - a name from LOCATIONS below        (!wx home)
@@ -156,6 +161,26 @@ EIGHTBALL_ANSWERS = [
     "No.", "Not a chance.", "The mesh says no.",
     "Unlikely.", "All nodes disagree.", "Don't count on it.",
 ]
+
+# ---------- Who's about: !who, !status ----------
+WHO_HOURS = 24                  # !who lists people heard in this many hours
+HEARD_KEEP_DAYS = 7             # forget a node not heard for this long
+HEARD_FILE = "heard.json"       # who was heard when, kept over restarts. Relative = next to run_bot.py
+
+# ---------- Frequencies: !freq <topic> ----------
+# config.toml [freq_lists] adds topics or replaces these. An empty string removes one.
+# "mesh" is not listed here: it reads the bot radio's own settings.
+FREQ_LISTS: dict[str, str] = {
+    "pmr": "PMR446 MHz: 1 446.00625, 2 .01875, 3 .03125, 4 .04375, 5 .05625, 6 .06875, 7 .08125, "
+           "8 .09375, 9-16 to .19375",
+    "cb": "CB UK 27/81 FM: ch1 27.60125 MHz, 10kHz steps, ch9 27.68125 emergency, ch19 27.78125. "
+          "EU CEPT: ch9 27.065, ch19 27.185",
+    "ham": "Ham FM calling MHz: 2m 145.500, 70cm 433.500, 6m 51.510, 4m 70.450",
+    "hf": "HF emergency centres of activity (IARU R1) MHz: 3.760, 7.110, 14.300, 18.160, 21.360",
+    "marine": "Marine VHF: ch16 156.800 distress and calling, ch67 156.375 UK small craft safety, "
+              "ch70 156.525 DSC only",
+    "air": "Air band: 121.500 MHz distress (guard)",
+}
 
 # ---------- Scheduled messages ----------
 # Each entry needs "text" and a target: "channel": <idx> or "dm": "<pubkey prefix>".
@@ -282,6 +307,11 @@ _CONFIG_SETTINGS: dict[str, Optional[Callable[[Any], Any]]] = {
     "ROLL_MAX_DICE": None,
     "ROLL_MAX_SIDES": None,
     "EIGHTBALL_ANSWERS": lambda v: [str(a) for a in v],
+    "WHO_HOURS": float,
+    "HEARD_KEEP_DAYS": float,
+    "HEARD_FILE": None,
+    "FREQ_LISTS": lambda d: {k: t for k, t in {**FREQ_LISTS, **{str(k).lower(): str(v) for k, v in d.items()}}.items()
+                             if t},
     "SCHEDULED_MESSAGES": lambda v: [dict(e) for e in v],
     "SCHEDULE_GRACE_SEC": None,
     "SCHEDULE_TICK_SEC": None,
@@ -578,6 +608,295 @@ def format_dist(info: dict[str, Any], contacts: dict, start: Optional[tuple[floa
         if len(text.encode("utf-8")) <= budget:
             return text
     return text
+
+
+# ---------- !bearing: distance and direction to a contact or place ----------
+def initial_bearing(a: tuple[float, float], b: tuple[float, float]) -> float:
+    """Compass bearing in degrees from a to b along the great circle."""
+    lat1, lon1, lat2, lon2 = map(math.radians, (*a, *b))
+    y = math.sin(lon2 - lon1) * math.cos(lat2)
+    x = math.cos(lat1) * math.sin(lat2) - math.sin(lat1) * math.cos(lat2) * math.cos(lon2 - lon1)
+    return math.degrees(math.atan2(y, x)) % 360
+
+
+def _match_names(items: list, query: str, name_of: Callable[[Any], str]) -> list:
+    """Items whose name is `query` (ignoring case), else starts with it, else contains it."""
+    q = " ".join(query.split()).lower()
+    if not q:
+        return []
+    for test in (lambda n: n == q, lambda n: n.startswith(q), lambda n: q in n):
+        found = [i for i in items if test(" ".join(name_of(i).split()).lower())]
+        if found:
+            return found
+    return []
+
+
+def _contact_name(c: dict) -> str:
+    return (c.get("adv_name") or "").strip()
+
+
+def find_contacts(contacts: dict, query: str) -> list[dict]:
+    return _match_names(list(contacts.values()), query, _contact_name)
+
+
+def _names_list(names: list[str], limit: int = 4) -> str:
+    """'Alice, Alan, Alfie +2 more'."""
+    shown = ", ".join(n[:PATH_NAME_CHARS].strip() for n in names[:limit])
+    return shown + (f" +{len(names) - limit} more" if len(names) > limit else "")
+
+
+async def get_bearing(query: str, contacts: dict, start: Optional[tuple[float, float]]) -> str:
+    """!bearing: '🧭 Alice: 2.3km NE (48°) from you'. Measures from the sender when their
+    position is known, else from the bot. A name that isn't a contact is tried as a place."""
+    icon = "🧭 " if USE_EMOJI else "Bearing: "
+    q = query.strip()
+    if not q:
+        return icon + "Use !bearing <name or place>, e.g. !bearing Alice, !bearing NR1, !bearing 52.6,1.3"
+    origin, frm = (start, "you") if start else (bot_position(), "the bot")
+    if not origin:
+        return icon + "Your position isn't known and the bot has none set"
+    matches = find_contacts(contacts, q)
+    if len(matches) > 1:
+        return f"{icon}{len(matches)} contacts match '{q}': {_names_list([_contact_name(c) for c in matches])}"
+    if matches:
+        label, pos = _contact_name(matches[0]), _gps(matches[0])
+        if not pos:
+            return f"{icon}{label} doesn't share a position"
+    else:
+        try:
+            lat, lon, label = await asyncio.to_thread(_geocode_sync, q)
+        except LocationError:
+            return f"{icon}No contact or place called '{q}'"
+        except Exception as ex:
+            _LOGGER.warning("Place lookup failed for %r: %s", q, ex)
+            return f"{icon}'{q}' isn't a contact and the place lookup failed"
+        pos = (lat, lon)
+    km = haversine_km(origin, pos)
+    if km < 0.05:
+        return f"{icon}{label} is right by {frm}"
+    deg = initial_bearing(origin, pos)
+    return f"{icon}{label}: {_distance(km)} {_compass(deg)} ({deg:.0f}°) from {frm}"
+
+
+# ---------- !who and !status: who the bot has heard ----------
+class Heard:
+    """Nodes the bot has heard, by a message on a listened channel, a DM or an advert.
+    Keyed by lower-case name. Loaded from HEARD_FILE at startup and saved to it on exit only."""
+
+    def __init__(self):
+        self.nodes: dict[str, dict[str, Any]] = {}
+        self.dirty = False
+
+    def record(self, name: str, via: str, info: Optional[dict[str, Any]] = None, key: str = "",
+               repeater: bool = False, now: Optional[float] = None) -> None:
+        """via is 'ch1', 'dm' or 'advert'. info is the message's rx info (hops, SNR)."""
+        name = " ".join((name or "").split())
+        if not name:
+            return
+        entry: dict[str, Any] = {"name": name, "at": time.time() if now is None else now, "via": via}
+        key = key or self.nodes.get(name.lower(), {}).get("key", "")
+        if key:
+            entry["key"] = key.lower()
+        if repeater:
+            entry["repeater"] = True
+        info = info or {}
+        if info.get("direct"):
+            entry["direct"] = True
+        for field in ("path_len", "snr"):
+            if info.get(field) is not None:
+                entry[field] = info[field]
+        self.nodes[name.lower()] = entry
+        self.dirty = True
+
+    def find(self, query: str) -> list[dict[str, Any]]:
+        return _match_names(list(self.nodes.values()), query, lambda e: e["name"])
+
+    def recent(self, hours: float, now: Optional[float] = None, repeaters: bool = False) -> list[dict[str, Any]]:
+        """People (or repeaters) heard in the last `hours`, most recent first."""
+        cutoff = (time.time() if now is None else now) - hours * 3600
+        found = [e for e in self.nodes.values() if e["at"] >= cutoff and bool(e.get("repeater")) == repeaters]
+        return sorted(found, key=lambda e: -e["at"])
+
+    def prune(self, now: Optional[float] = None) -> None:
+        cutoff = (time.time() if now is None else now) - HEARD_KEEP_DAYS * 86400
+        old = [k for k, e in self.nodes.items() if e["at"] < cutoff]
+        for k in old:
+            del self.nodes[k]
+        self.dirty = self.dirty or bool(old)
+
+    def load(self, path: str) -> None:
+        try:
+            with open(path, encoding="utf-8") as fh:
+                data = json.load(fh)
+            self.nodes = {e["name"].lower(): e for e in data if e.get("name") and isinstance(e.get("at"), (int, float))}
+        except FileNotFoundError:
+            return
+        except (OSError, ValueError, TypeError, AttributeError) as ex:
+            _LOGGER.warning("Can't read %s, starting with no one heard: %s", path, ex)
+
+    def save(self, path: str) -> bool:
+        """Write the list if it changed since the last save. False when the write failed."""
+        if not self.dirty:
+            return True
+        tmp = path + ".tmp"
+        try:
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump(list(self.nodes.values()), fh)
+            os.replace(tmp, path)
+            self.dirty = False
+            return True
+        except OSError as ex:
+            _LOGGER.warning("Can't save %s: %s", path, ex)
+            return False
+
+
+_heard = Heard()
+
+
+def heard_path() -> str:
+    return HEARD_FILE if os.path.isabs(HEARD_FILE) else os.path.join(SCRIPT_DIR, HEARD_FILE)
+
+
+def save_heard(heard: Optional[Heard] = None, path: Optional[str] = None) -> str:
+    """!save (admin): write the heard list now, before a power cut, rather than waiting for the bot to stop."""
+    heard = _heard if heard is None else heard
+    path = heard_path() if path is None else path
+    icon = "💾 " if USE_EMOJI else ""
+    n = len(heard.nodes)
+    nodes = f"{n} node{'' if n == 1 else 's'}"
+    if not heard.dirty:
+        return f"{icon}Nothing new to save, {nodes} already in {os.path.basename(path)}"
+    if not heard.save(path):
+        return f"{icon}Save failed, see the log"
+    return f"{icon}Saved {nodes} to {os.path.basename(path)}"
+
+
+def _ago(seconds: float) -> str:
+    """Short age: '40s', '5m', '3h', '2d'."""
+    seconds = max(0, seconds)
+    if seconds < 60:
+        return f"{seconds:.0f}s"
+    if seconds < 3600:
+        return f"{seconds // 60:.0f}m"
+    if seconds < 172800:
+        return f"{seconds // 3600:.0f}h"
+    return f"{seconds // 86400:.0f}d"
+
+
+def _via_text(via: str) -> str:
+    if via == "dm":
+        return "by DM"
+    if via == "advert":
+        return "by advert"
+    return f"on {via}"
+
+
+def format_who(heard: Heard, arg: str = "", now: Optional[float] = None, budget: Optional[int] = None) -> str:
+    """!who: '👥 4 heard in 24h: Alice 2m, Bob 15m, Carol 3h +1 more'.
+    '!who 2' looks back 2 hours, '!who rpt' lists repeaters instead of people."""
+    budget = MAX_REPLY_BYTES if budget is None else budget
+    now = time.time() if now is None else now
+    icon = "👥 " if USE_EMOJI else ""
+    words = arg.lower().split()
+    repeaters = any(w in ("rpt", "rpts", "repeater", "repeaters") for w in words)
+    hours = WHO_HOURS
+    for w in words:
+        try:
+            hours = min(max(float(w.rstrip("h")), 0.1), HEARD_KEEP_DAYS * 24)
+        except ValueError:
+            pass
+    what = "repeaters" if repeaters else "people"
+    found = heard.recent(hours, now, repeaters=repeaters)
+    if not found:
+        return f"{icon}No {what} heard in the last {hours:g}h"
+    kind = ("repeater " if len(found) == 1 else "repeaters ") if repeaters else ""
+    head = f"{icon}{len(found)} {kind}heard in {hours:g}h: "
+    items = [f"{e['name'][:PATH_NAME_CHARS].strip()} {_ago(now - e['at'])}" for e in found]
+    for n in range(len(items), 0, -1):
+        text = head + ", ".join(items[:n]) + (f" +{len(items) - n} more" if n < len(items) else "")
+        if len(text.encode("utf-8")) <= budget:
+            return text
+    return head + f"+{len(items)} more"
+
+
+def format_status(query: str, heard: Heard, contacts: dict, bot_pos: Optional[tuple[float, float]],
+                  now: Optional[float] = None) -> str:
+    """!status: '👤 Alice: heard 12m ago on ch1, 2 hops, SNR 7.5dB | 📍 4.2km NE of bot'.
+    Falls back to the contact's last advert when the bot hasn't heard them itself."""
+    now = time.time() if now is None else now
+    icon, pin = ("👤 ", "📍 ") if USE_EMOJI else ("", "")
+    q = query.strip()
+    if not q:
+        return icon + "Use !status <name>, e.g. !status Alice. !who lists who's been heard"
+    matches = heard.find(q)
+    if len(matches) > 1:
+        return f"{icon}{len(matches)} match '{q}': {_names_list([e['name'] for e in matches])}"
+    contact = None
+    if matches:
+        e = matches[0]
+        name = e["name"]
+        parts = [f"heard {_ago(now - e['at'])} ago {_via_text(e['via'])}"]
+        if e.get("direct"):
+            parts.append("direct route")
+        elif e.get("path_len") is not None:
+            parts.append(_hops(e["path_len"]))
+        if e.get("snr") is not None:
+            parts.append(f"SNR {e['snr']:g}dB")
+        by_key = [c for c in contacts.values()
+                  if e.get("key") and (c.get("public_key") or "").lower().startswith(e["key"])]
+        by_name = [c for c in contacts.values() if _contact_name(c).lower() == name.lower()]
+        contact = (by_key or by_name or [None])[0]
+    else:
+        found = find_contacts(contacts, q)
+        if len(found) > 1:
+            return f"{icon}{len(found)} contacts match '{q}': {_names_list([_contact_name(c) for c in found])}"
+        if not found:
+            return f"{icon}No one called '{q}' heard"
+        contact = found[0]
+        name = _contact_name(contact)
+        advert = contact.get("last_advert") or 0
+        # last_advert is the node's own clock, so ignore one that is far in the future
+        parts = [f"last advert {_ago(now - advert)} ago" if 0 < advert <= now + 3600 else "in contacts, not heard yet"]
+    text = f"{icon}{name}: " + ", ".join(parts)
+    pos = _gps(contact)
+    if pos and bot_pos:
+        km = haversine_km(bot_pos, pos)
+        where = f"{_distance(km)} {_compass(initial_bearing(bot_pos, pos))} of bot" if km >= 0.05 else "at the bot"
+        text += f" | {pin}{where}"
+    return text
+
+
+# ---------- !freq: frequency lists ----------
+FREQ_ALIASES = {"pmr446": "pmr", "amateur": "ham", "sea": "marine", "boat": "marine",
+                "airband": "air", "aircraft": "air", "meshcore": "mesh", "lora": "mesh"}
+
+
+def mesh_freq(self_info: Optional[dict] = None) -> str:
+    """The bot radio's own settings, so others can match them: 'MeshCore here: 869.618 MHz, BW 62.5kHz, SF8, CR8'."""
+    if self_info is None:
+        self_info = getattr(_radio, "self_info", None) or {}
+    freq = self_info.get("radio_freq")
+    if not freq:
+        return "MeshCore radio settings not known"
+    parts = [f"{freq:g} MHz"]
+    if self_info.get("radio_bw"):
+        parts.append(f"BW {self_info['radio_bw']:g}kHz")
+    if self_info.get("radio_sf"):
+        parts.append(f"SF{self_info['radio_sf']}")
+    if self_info.get("radio_cr"):
+        parts.append(f"CR{self_info['radio_cr']}")
+    return "MeshCore here: " + ", ".join(parts)
+
+
+def format_freq(topic: str, self_info: Optional[dict] = None) -> str:
+    icon = "📻 " if USE_EMOJI else ""
+    t = topic.strip().lower().lstrip("!")
+    t = FREQ_ALIASES.get(t, t)
+    if t == "mesh":
+        return icon + mesh_freq(self_info)
+    if t in FREQ_LISTS:
+        return icon + FREQ_LISTS[t]
+    return icon + "Frequencies: !freq " + ", ".join(list(FREQ_LISTS) + ["mesh"])
 
 
 # =====================================================================
@@ -1892,14 +2211,17 @@ def split_sender(text: str) -> tuple[str, str]:
 # Commands that work with or without a leading "!", but only as the whole message
 PLAIN_COMMANDS = {"ping", "test"}
 # Commands that only work with a leading "!" (returned as "!name")
-BANG_COMMANDS = {"help", "helptest", "helpwx", "helpradio", "helpfun", "helpconv", "conv", "ohm", "res", "roll", "flipacoin", "eightball", "wx", "wxh", "wxf",
+BANG_COMMANDS = {"help", "helptest", "helpwx", "helpradio", "helpfun", "helpconv", "helpnet", "conv", "ohm", "res", "roll", "flipacoin", "eightball", "wx", "wxh", "wxf",
                  "warn", "sun", "moon", "aurora", "aq", "pollen", "path", "dist", "hf", "vhf", "uhf",
-                 "stats", "uptime", "mute", "unmute", "say"}
+                 "who", "status", "bearing", "freq",
+                 "stats", "uptime", "mute", "unmute", "say", "save"}
 COMMAND_ALIASES = {"8ball": "eightball", "flip": "flipacoin", "coin": "flipacoin", "dice": "roll",
                    "warnings": "warn", "sunrise": "sun", "sunset": "sun", "trace": "path",
                    "solar": "aurora", "air": "aq", "bands": "hf", "tropo": "uhf",
                    "convert": "conv", "units": "conv", "ohms": "ohm", "vir": "ohm", "ohmslaw": "ohm",
-                   "resistor": "res", "colour": "res", "color": "res"}
+                   "resistor": "res", "colour": "res", "color": "res",
+                   "heard": "who", "seen": "status", "lastheard": "status", "brg": "bearing",
+                   "find": "bearing", "freqs": "freq", "frequency": "freq"}
 
 
 def parse_command(body: str) -> tuple[str, str]:
@@ -2191,7 +2513,7 @@ async def scheduler(sender: Sender, entries: list[dict]) -> None:
 # =====================================================================
 WX_COMMANDS = ["!wx", "!wxh", "!wxf"]             # need a Met Office API key
 PLACE_COMMANDS = ["!warn", "!sun", "!aq", "!pollen", "!uhf"]
-HELP_TOPICS = ("test", "wx", "radio", "fun", "conv")
+HELP_TOPICS = ("test", "net", "wx", "radio", "fun", "conv")
 
 
 def help_text(topic: str = "") -> str:
@@ -2210,12 +2532,14 @@ def help_text(topic: str = "") -> str:
         return "Fun: !roll [2d6+1] dice, !flip coin, !8ball <question>"
     if topic == "conv":
         return "Conversions: !conv 10 mi km, !conv 5 w dbm. !ohm two of V/A/Ω/W, e.g. !ohm 12v 2a. !res 4k7 or !res yellow violet red"
-    return "Help: !helptest (ping, path), !helpwx (weather), !helpradio (bands), !helpfun (dice), !helpconv (units, ohms, resistors)"
+    if topic == "net":
+        return "Net: !who [hours|rpt] heard lately, !status <name> last heard, !bearing <name|place>, !freq <pmr|cb|ham|hf|marine|air|mesh>"
+    return "Help: !helptest (ping, path), !helpnet (who, freq), !helpwx (weather), !helpradio (bands), !helpfun, !helpconv (units)"
 
 
 # Only answered in a DM from a key in ADMIN_PUBKEYS. Channel messages carry no key,
 # so these are never answered in a channel.
-ADMIN_COMMANDS = {"!stats", "!uptime", "!mute", "!unmute", "!say"}
+ADMIN_COMMANDS = {"!stats", "!uptime", "!mute", "!unmute", "!say", "!save"}
 
 
 def command_allowed(cmd: str, admin: bool) -> bool:
@@ -2687,6 +3011,15 @@ async def run_command(cmd: str, arg: str, sender_name: str, rx_info: dict[str, A
         start = sender_position(contacts, name=sender_name, key_prefix=dm_key)
         return mention + format_dist(rx_info, contacts, start, bot_position(),
                                      budget=MAX_REPLY_BYTES - len(mention.encode("utf-8")))
+    if cmd == "!bearing":
+        start = sender_position(contacts, name=sender_name, key_prefix=dm_key)
+        return mention + await get_bearing(arg, contacts, start)
+    if cmd == "!status":
+        return mention + format_status(arg, _heard, contacts, bot_position())
+    if cmd == "!who":
+        return mention + format_who(_heard, arg, budget=MAX_REPLY_BYTES - len(mention.encode("utf-8")))
+    if cmd == "!freq":
+        return mention + format_freq(arg)
     if cmd.startswith("!help"):
         return help_text(cmd[5:] or arg)
     if cmd == "!conv":
@@ -2732,6 +3065,8 @@ async def run_command(cmd: str, arg: str, sender_name: str, rx_info: dict[str, A
         return mention + mute(arg)
     if cmd == "!unmute":
         return mention + unmute()
+    if cmd == "!save":
+        return mention + save_heard()
     if cmd == "!say":
         return mention + say(arg)
     if cmd in WX_MODES:
@@ -2779,6 +3114,25 @@ async def main(port: str) -> None:
 
     await refresh_contacts()
     _LOGGER.info("%d repeaters known for !path names", len(repeater_names()))
+    _heard.load(heard_path())
+    _LOGGER.info("%d nodes remembered for !who and !status", len(_heard.nodes))
+
+    def contact_by_key(key: str) -> Optional[dict]:
+        key = (key or "").lower()
+        if not key:
+            return None
+        found = [c for c in (meshcore.contacts or {}).values()
+                 if (c.get("public_key") or "").lower().startswith(key)]
+        return found[0] if len(found) == 1 else None
+
+    async def handle_advert(event):
+        """An advert tells !who and !status a node is still about, repeaters included."""
+        payload = event.payload or {}
+        key = payload.get("public_key", "")
+        contact = contact_by_key(key) or (payload if payload.get("adv_name") else None)
+        if contact and _contact_name(contact) != self_name:
+            _heard.record(_contact_name(contact), "advert", key=key[:12],
+                          repeater=contact.get("type") != CHAT_NODE_TYPE)
 
     async def handle_rx_log_data(event):
         parsed = parse_rx_log_data(event.payload or {})
@@ -2829,6 +3183,8 @@ async def main(port: str) -> None:
         if self_name and sender_name == self_name:
             return
         _stats.heard += 1
+        rx_info = message_rx_info(msg)
+        _heard.record(sender_name, f"ch{chan}", rx_info)
         cmd, arg = parse_command(body)
         _LOGGER.log(logging.INFO if cmd else logging.DEBUG, "RX ch%s %s: %s", chan, sender_name, body)
         dispatch(cmd, arg, sender_name,
@@ -2836,7 +3192,7 @@ async def main(port: str) -> None:
                  chan_key=f"ch:{chan}",
                  reply=lambda t: sender.channel(chan, t),
                  target=("chan", chan),
-                 rx_info=message_rx_info(msg))
+                 rx_info=rx_info)
 
     async def handle_contact_message(event):
         msg = event.payload or {}
@@ -2845,6 +3201,10 @@ async def main(port: str) -> None:
             return
         text = msg.get("text", "")
         _stats.heard += 1
+        rx_info = message_rx_info(msg)
+        contact = contact_by_key(prefix)
+        if contact:
+            _heard.record(_contact_name(contact), "dm", rx_info, key=prefix)
         cmd, arg = parse_command(text)
         _LOGGER.log(logging.INFO if cmd else logging.DEBUG, "RX dm %s: %s", prefix, text)
         dispatch(cmd, arg, "",
@@ -2852,7 +3212,7 @@ async def main(port: str) -> None:
                  chan_key="dm",
                  reply=lambda t: sender.dm(prefix, t),
                  target=("dm", prefix),
-                 rx_info=message_rx_info(msg),
+                 rx_info=rx_info,
                  admin=prefix.lower() in admin_prefixes)
 
     subs = [
@@ -2861,6 +3221,9 @@ async def main(port: str) -> None:
     ]
     if ANSWER_DMS:
         subs.append(meshcore.subscribe(EventType.CONTACT_MSG_RECV, handle_contact_message))
+    for name in ("ADVERTISEMENT", "NEW_CONTACT"):
+        if hasattr(EventType, name):
+            subs.append(meshcore.subscribe(getattr(EventType, name), handle_advert))
 
     async def housekeeping():
         while True:
@@ -2872,6 +3235,7 @@ async def main(port: str) -> None:
             _air_cache.cleanup()
             _hamqsl_cache.cleanup()
             _tropo_cache.cleanup()
+            _heard.prune()      # in memory only: HEARD_FILE is written on exit or by !save
             await refresh_contacts()
 
     tasks = [
@@ -2885,6 +3249,10 @@ async def main(port: str) -> None:
     try:
         await asyncio.gather(*tasks)
     finally:
+        # Only written here and by an admin !save, to spare the SD card. systemd stops the bot
+        # with SIGINT, so this runs on stop, restart and a clean reboot. A power cut loses
+        # what was heard since the last save.
+        _heard.save(heard_path())
         for t in tasks + list(running):
             t.cancel()
         for s in subs:

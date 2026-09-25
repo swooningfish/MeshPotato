@@ -25,6 +25,8 @@ meshbot/
 *.log
 *.pid
 nohup.out
+heard.json
+heard.json.tmp
 
 # Editors and OS
 .vscode/
