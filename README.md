@@ -545,6 +545,7 @@ The bot keeps a list of every node it hears:
 
 Notes:
 
+- Each node is listed once, with its latest name and time. Names that differ only by emoji or symbols, such as `Sam 🐬 Base` and `Sam 🐟 Base`, count as the same node. So does a node that is renamed but keeps its key, when the bot knows the key from a DM, an advert or its contacts.
 - `!status` matches the whole name first, then the start of a name, then any part of it. If several match, it lists them.
 - If the bot hasn't heard someone itself, `!status` falls back to the last advert time in its contacts. That time comes from the other node's clock, so treat it as a rough guide.
 - The position is the one in the node's advert, measured from the bot as for `!dist`.

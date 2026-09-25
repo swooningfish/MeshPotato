@@ -679,9 +679,20 @@ async def get_bearing(query: str, contacts: dict, start: Optional[tuple[float, f
 
 
 # ---------- !who and !status: who the bot has heard ----------
+HEARD_KEY_CHARS = 12            # public key prefix kept per node, as in a DM's pubkey_prefix
+
+
+def heard_id(name: str) -> str:
+    """Name with emoji and symbols removed, lower case, so 'Sam 🐬 Base' and 'Sam 🐟 Base'
+    are one node. A name with no letters or digits keeps its symbols."""
+    plain = " ".join(re.sub(r"[^\w\s]", "", name).split()).lower()
+    return plain or " ".join(name.split()).lower()
+
+
 class Heard:
     """Nodes the bot has heard, by a message on a listened channel, a DM or an advert.
-    Keyed by lower-case name. Loaded from HEARD_FILE at startup and saved to it on exit only."""
+    Keyed by heard_id(name). A node that changes its name but keeps its key replaces its
+    old entry. Loaded from HEARD_FILE at startup and saved to it on exit or by !save."""
 
     def __init__(self):
         self.nodes: dict[str, dict[str, Any]] = {}
@@ -693,10 +704,14 @@ class Heard:
         name = " ".join((name or "").split())
         if not name:
             return
+        node_id = heard_id(name)
         entry: dict[str, Any] = {"name": name, "at": time.time() if now is None else now, "via": via}
-        key = key or self.nodes.get(name.lower(), {}).get("key", "")
+        key = (key or self.nodes.get(node_id, {}).get("key", "")).lower()[:HEARD_KEY_CHARS]
         if key:
-            entry["key"] = key.lower()
+            entry["key"] = key
+            # Same key under another name: the node was renamed, so drop the old name
+            for other in [k for k, e in self.nodes.items() if k != node_id and e.get("key") == key]:
+                del self.nodes[other]
         if repeater:
             entry["repeater"] = True
         info = info or {}
@@ -705,8 +720,19 @@ class Heard:
         for field in ("path_len", "snr"):
             if info.get(field) is not None:
                 entry[field] = info[field]
-        self.nodes[name.lower()] = entry
+        self.nodes[node_id] = entry
         self.dirty = True
+
+    def _merge(self, entry: dict[str, Any]) -> None:
+        """Add a saved entry, keeping the newest when two are the same node."""
+        node_id = heard_id(entry["name"])
+        key = entry.get("key")
+        same = [k for k, e in self.nodes.items() if k == node_id or (key and e.get("key") == key)]
+        if any(self.nodes[k]["at"] >= entry["at"] for k in same):
+            return
+        for k in same:
+            del self.nodes[k]
+        self.nodes[node_id] = entry
 
     def find(self, query: str) -> list[dict[str, Any]]:
         return _match_names(list(self.nodes.values()), query, lambda e: e["name"])
@@ -728,7 +754,10 @@ class Heard:
         try:
             with open(path, encoding="utf-8") as fh:
                 data = json.load(fh)
-            self.nodes = {e["name"].lower(): e for e in data if e.get("name") and isinstance(e.get("at"), (int, float))}
+            self.nodes = {}
+            for e in data:
+                if e.get("name") and isinstance(e.get("at"), (int, float)):
+                    self._merge(e)
         except FileNotFoundError:
             return
         except (OSError, ValueError, TypeError, AttributeError) as ex:
@@ -811,12 +840,15 @@ def format_who(heard: Heard, arg: str = "", now: Optional[float] = None, budget:
         return f"{icon}No {what} heard in the last {hours:g}h"
     kind = ("repeater " if len(found) == 1 else "repeaters ") if repeaters else ""
     head = f"{icon}{len(found)} {kind}heard in {hours:g}h: "
-    items = [f"{e['name'][:PATH_NAME_CHARS].strip()} {_ago(now - e['at'])}" for e in found]
-    for n in range(len(items), 0, -1):
-        text = head + ", ".join(items[:n]) + (f" +{len(items) - n} more" if n < len(items) else "")
-        if len(text.encode("utf-8")) <= budget:
-            return text
-    return head + f"+{len(items)} more"
+    # Full names when they fit, else names cut to PATH_NAME_CHARS, else fewer names
+    for n in range(len(found), 0, -1):
+        more = f" +{len(found) - n} more" if n < len(found) else ""
+        for cut in (None, PATH_NAME_CHARS):
+            items = [f"{e['name'][:cut].strip()} {_ago(now - e['at'])}" for e in found[:n]]
+            text = head + ", ".join(items) + more
+            if len(text.encode("utf-8")) <= budget:
+                return text
+    return head + f"+{len(found)} more"
 
 
 def format_status(query: str, heard: Heard, contacts: dict, bot_pos: Optional[tuple[float, float]],
@@ -3131,7 +3163,7 @@ async def main(port: str) -> None:
         key = payload.get("public_key", "")
         contact = contact_by_key(key) or (payload if payload.get("adv_name") else None)
         if contact and _contact_name(contact) != self_name:
-            _heard.record(_contact_name(contact), "advert", key=key[:12],
+            _heard.record(_contact_name(contact), "advert", key=key,
                           repeater=contact.get("type") != CHAT_NODE_TYPE)
 
     async def handle_rx_log_data(event):
@@ -3184,7 +3216,9 @@ async def main(port: str) -> None:
             return
         _stats.heard += 1
         rx_info = message_rx_info(msg)
-        _heard.record(sender_name, f"ch{chan}", rx_info)
+        named = [c for c in (meshcore.contacts or {}).values() if _contact_name(c) == sender_name]
+        _heard.record(sender_name, f"ch{chan}", rx_info,
+                      key=named[0].get("public_key", "") if len(named) == 1 else "")
         cmd, arg = parse_command(body)
         _LOGGER.log(logging.INFO if cmd else logging.DEBUG, "RX ch%s %s: %s", chan, sender_name, body)
         dispatch(cmd, arg, sender_name,

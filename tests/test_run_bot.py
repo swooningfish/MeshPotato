@@ -1,4 +1,5 @@
 import asyncio
+import json
 import time
 from collections import Counter
 from datetime import date, datetime, timedelta, timezone
@@ -601,6 +602,44 @@ def test_heard_record_keeps_key():
     assert len(h.nodes) == 4
 
 
+def test_heard_same_person_new_emoji():
+    h = bot.Heard()
+    h.record("Sam 🐟 Base Camp", "ch1", now=HEARD_NOW - 30)
+    h.record("Sam 🐬 Base Camp", "ch1", now=HEARD_NOW)
+    assert list(h.nodes) == ["sam base camp"]
+    assert bot.format_who(h, now=HEARD_NOW) == "👥 1 heard in 24h: Sam 🐬 Base Camp 0s"
+    assert bot.heard_id("🐬🐟") == "🐬🐟"          # all symbols: nothing to strip
+
+
+def test_heard_rename_with_same_key():
+    h = bot.Heard()
+    h.record("Old Name", "dm", key="D4DD00AABBCCDDEE", now=HEARD_NOW - 60)
+    h.record("New Name", "advert", key="d4dd00aabbcc", now=HEARD_NOW)
+    assert [e["name"] for e in h.nodes.values()] == ["New Name"]
+    assert h.nodes["new name"]["key"] == "d4dd00aabbcc"
+
+
+def test_heard_load_merges_duplicates(tmp_path):
+    path = tmp_path / "heard.json"
+    path.write_text(json.dumps([
+        {"name": "Sam 🐬 Base Camp", "at": HEARD_NOW, "via": "ch1"},
+        {"name": "Sam 🐟 Base Camp", "at": HEARD_NOW - 30, "via": "ch1"},
+        {"name": "Old Name", "at": HEARD_NOW - 99, "via": "dm", "key": "d4dd00aabbcc"},
+        {"name": "New Name", "at": HEARD_NOW - 5, "via": "advert", "key": "d4dd00aabbcc"},
+    ]), encoding="utf-8")
+    h = bot.Heard()
+    h.load(str(path))
+    assert sorted(e["name"] for e in h.nodes.values()) == ["New Name", "Sam 🐬 Base Camp"]
+
+
+def test_format_who_full_names_when_they_fit():
+    h = bot.Heard()
+    h.record("Sam 🐬 Base Camp", "ch1", now=HEARD_NOW)
+    h.record("Alice in Norwich", "ch1", now=HEARD_NOW - 60)
+    assert bot.format_who(h, now=HEARD_NOW) == "👥 2 heard in 24h: Sam 🐬 Base Camp 0s, Alice in Norwich 1m"
+    assert bot.format_who(h, now=HEARD_NOW, budget=60) == "👥 2 heard in 24h: Sam 🐬 Base C 0s, Alice in Nor 1m"
+
+
 def test_format_who():
     h = _heard()
     assert bot.format_who(h, now=HEARD_NOW) == "👥 2 heard in 24h: Alice 2m, Bob 3h"
@@ -657,6 +696,22 @@ def test_heard_save_load_prune(tmp_path, monkeypatch):
     broken.load(str(tmp_path / "bad.json"))
     broken.load(str(tmp_path / "missing.json"))
     assert broken.nodes == {}
+
+
+def test_save_heard(tmp_path):
+    path = str(tmp_path / "heard.json")
+    h = _heard()
+    assert bot.save_heard(h, path) == "💾 Saved 4 nodes to heard.json"
+    assert bot.save_heard(h, path) == "💾 Nothing new to save, 4 nodes already in heard.json"
+    h.record("Zed", "ch1")
+    assert bot.save_heard(h, str(tmp_path / "missing_dir" / "heard.json")) == "💾 Save failed, see the log"
+    assert h.dirty
+
+
+def test_save_is_admin_only():
+    assert bot.parse_command("!save") == ("!save", "")
+    assert not bot.command_allowed("!save", admin=False)
+    assert bot.command_allowed("!save", admin=True)
 
 
 def test_who_and_status_commands(monkeypatch):
