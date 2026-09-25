@@ -83,7 +83,7 @@ Send commands in a channel the bot listens on (channels 1 and 3 by default), or 
 1. `ping` and `test` must be the **whole message**. The `!` is optional. "ping me later" is ignored.
 2. Every other command **starts with `!`**. Ordinary chat that happens to start with "wx" or "help" doesn't trigger anything.
 
-Send `!help` on the mesh for the command list.
+Send `!help` on the mesh for the list of help topics, then `!helptest`, `!helpwx`, `!helpradio` or `!helpfun` for the commands in each. `!help wx` works too.
 
 ### Command cheat sheet
 
@@ -108,7 +108,8 @@ Send `!help` on the mesh for the command list.
 | `!roll [dice]` | Dice roll, such as `!roll 2d6` |
 | `!flipacoin` | Heads or tails |
 | `!eightball <question>` | Magic eight ball |
-| `!help` | Command list |
+| `!conv <n> <unit> [unit]` | Unit conversion, such as `!conv 10 mi km` |
+| `!help [topic]` | Help topics: `!helptest`, `!helpwx`, `!helpradio`, `!helpfun` |
 
 `[place]` is optional. Leave it out to use the bot's default location. It can be:
 
@@ -777,9 +778,41 @@ Aliases: `!dice` = `!roll`, `!flip` and `!coin` = `!flipacoin`, `!8ball` = `!eig
 - `!eightball` needs a question. It picks from 19 answers: 8 yes, 5 unsure and 6 no. Change them with `eightball_answers`.
 - Dice, coin and eight ball use Python's `SystemRandom`, which draws on the operating system's random source.
 
+### Unit conversion (!conv)
+
+| Command | Reply |
+|---------|-------|
+| `!conv 10 mi km` | `📐 10 mi = 16.09 km` |
+| `!conv 10mi to km` | `📐 10 mi = 16.09 km` |
+| `!conv 20 c` | `📐 20°C = 68°F` |
+| `!conv 70 mph` | `📐 70 mph = 112.7 km/h` |
+| `!conv 1013 hpa` | `📐 1013 hPa = 29.91 inHg` |
+| `!conv 5 w dbm` | `📐 5 W = 36.99 dBm` |
+| `!conv 868 mhz` | `📐 868 MHz = 34.54 cm` (wavelength) |
+| `!conv 2 m mhz` | `📐 2 m = 149.9 MHz` |
+
+Aliases: `!convert` and `!units` = `!conv`.
+
+- Give one unit to convert to its usual partner (km ↔ mi, °C ↔ °F, kg ↔ lb, W ↔ dBm and so on), or two to choose. `to` between them is optional.
+- A frequency converts to a wavelength and back. With one unit, wavelengths under 1 m are shown in cm.
+- Replies have about 4 significant figures.
+
+| Kind | Units |
+|------|-------|
+| Length | `mm`, `cm`, `m`, `km`, `in`, `ft`, `yd`, `mi`, `nmi` |
+| Weight | `g`, `kg`, `oz`, `lb`, `st` |
+| Volume | `ml`, `l`, `floz`, `pt`, `gal` (UK), `usgal` |
+| Speed | `m/s`, `km/h` (`kph`), `mph`, `kn` |
+| Pressure | `hPa` (`mb`), `inHg`, `mmHg`, `psi`, `bar` |
+| Temperature | `c`, `f`, `k` (`°C` and `°F` work too) |
+| Power | `mW`, `W`, `kW`, `dBm` |
+| Frequency | `Hz`, `kHz`, `MHz`, `GHz` |
+
+Unit names are not case sensitive.
+
 ### Admin commands
 
-These only work in a **direct message** from a key in `admin_pubkeys`. Anyone else, and any channel message, gets no reply. They aren't listed in `!help`.
+These only work in a **direct message** from a key in `admin_pubkeys`. Anyone else, and any channel message, gets no reply. They aren't listed in `!help` or its topics.
 
 | Command | Reply |
 |---------|-------|

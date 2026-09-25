@@ -26,10 +26,11 @@ Commands (channel or direct message):
   !mute <minutes>    -> Stop replies and scheduled messages for a while (admin DMs only)
   !unmute            -> End a mute early (admin DMs only)
   !say <ch> <text>   -> Post text to a channel as the bot (admin DMs only)
-  !help              -> Command list                       (the ! is required)
+  !help              -> Help topics: !helptest, !helpwx, !helpradio, !helpfun (the ! is required)
   !roll [NdS+M]      -> Roll dice: !roll, !roll d20, !roll 2d6+3
   !flipacoin         -> Heads or tails
   !eightball <q>     -> Ask the eight ball a yes/no question
+  !conv <n> <unit> [unit] -> Unit conversion: !conv 10 mi km, !conv 20 c, !conv 868 mhz
 
 [location] accepts:
   - a name from LOCATIONS below        (!wx home)
@@ -1889,12 +1890,13 @@ def split_sender(text: str) -> tuple[str, str]:
 # Commands that work with or without a leading "!", but only as the whole message
 PLAIN_COMMANDS = {"ping", "test"}
 # Commands that only work with a leading "!" (returned as "!name")
-BANG_COMMANDS = {"help", "roll", "flipacoin", "eightball", "wx", "wxh", "wxf",
+BANG_COMMANDS = {"help", "helptest", "helpwx", "helpradio", "helpfun", "conv", "roll", "flipacoin", "eightball", "wx", "wxh", "wxf",
                  "warn", "sun", "moon", "aurora", "aq", "pollen", "path", "dist", "hf", "vhf", "uhf",
                  "stats", "uptime", "mute", "unmute", "say"}
 COMMAND_ALIASES = {"8ball": "eightball", "flip": "flipacoin", "coin": "flipacoin", "dice": "roll",
                    "warnings": "warn", "sunrise": "sun", "sunset": "sun", "trace": "path",
-                   "solar": "aurora", "air": "aq", "bands": "hf", "tropo": "uhf"}
+                   "solar": "aurora", "air": "aq", "bands": "hf", "tropo": "uhf",
+                   "convert": "conv", "units": "conv"}
 
 
 def parse_command(body: str) -> tuple[str, str]:
@@ -2188,10 +2190,21 @@ WX_COMMANDS = ["!wx", "!wxh", "!wxf"]             # need a Met Office API key
 PLACE_COMMANDS = ["!warn", "!sun", "!aq", "!pollen", "!uhf"]
 
 
-def help_text() -> str:
-    """Command list. The weather commands are left out when there is no Met Office API key."""
-    place = "/".join((WX_COMMANDS if wx_available() else []) + PLACE_COMMANDS)
-    return f"Cmds: ping, test, !path/!dist, {place} [place], !hf, !vhf, !moon, !aurora, !roll, !flip, !8ball"
+def help_text(topic: str = "") -> str:
+    """!help lists the topics, !help<topic> or !help <topic> the commands in one.
+    The weather commands are left out when there is no Met Office API key."""
+    topic = topic.strip().lower().lstrip("!")
+    topic = topic[4:] if topic.startswith("help") else topic
+    if topic == "test":
+        return "Mesh: ping (hops), test (SNR, RSSI, distance), !path (repeaters), !dist (leg distances). ping and test need no !"
+    if topic == "wx":
+        wx = "!wx now, !wxh hourly, !wxf 3-day, " if wx_available() else ""
+        return f"Weather: {wx}!warn warnings, !sun, !moon, !aq air, !pollen. Add a place: !sun Cromer, !aq NR1"
+    if topic == "radio":
+        return "Radio: !hf HF bands, !vhf 6m/4m/2m, !uhf [place] tropo, !aurora geomagnetic. Also !conv 5 w dbm, !conv 868 mhz"
+    if topic == "fun":
+        return "Fun: !roll [2d6+1] dice, !flip coin, !8ball <q>, !conv <n> <unit> [unit] e.g. !conv 10 mi km, !conv 20 c"
+    return "Help: !helptest (ping, path), !helpwx (weather, sun, air), !helpradio (bands, aurora), !helpfun (dice, units)"
 
 
 # Only answered in a DM from a key in ADMIN_PUBKEYS. Channel messages carry no key,
@@ -2300,6 +2313,139 @@ def eightball(question: str) -> str:
     return icon + _rng.choice(EIGHTBALL_ANSWERS)
 
 
+# ---------- Unit conversion ----------
+def _linear(dim: str, factor: float, label: str) -> tuple:
+    """A unit worth `factor` base units (m, kg, l, m/s, hPa, W, Hz)."""
+    return dim, (lambda v: v * factor), (lambda b: b / factor), label
+
+
+def _dbm_from_w(w: float) -> float:
+    if w <= 0:
+        raise ValueError("power must be above 0 W")
+    return 10 * math.log10(w) + 30
+
+
+# name -> (dimension, to base unit, from base unit, label)
+UNITS: dict[str, tuple] = {}
+for _names, _unit in [
+    (("mm",), _linear("length", 0.001, "mm")),
+    (("cm",), _linear("length", 0.01, "cm")),
+    (("m", "metre", "metres", "meter", "meters"), _linear("length", 1, "m")),
+    (("km",), _linear("length", 1000, "km")),
+    (("in", "inch", "inches"), _linear("length", 0.0254, "in")),
+    (("ft", "foot", "feet"), _linear("length", 0.3048, "ft")),
+    (("yd", "yard", "yards"), _linear("length", 0.9144, "yd")),
+    (("mi", "mile", "miles"), _linear("length", 1609.344, "mi")),
+    (("nmi",), _linear("length", 1852, "nmi")),
+    (("g", "gram", "grams"), _linear("mass", 0.001, "g")),
+    (("kg", "kilo", "kilos"), _linear("mass", 1, "kg")),
+    (("oz", "ounce", "ounces"), _linear("mass", 0.028349523125, "oz")),
+    (("lb", "lbs", "pound", "pounds"), _linear("mass", 0.45359237, "lb")),
+    (("st", "stone"), _linear("mass", 6.35029318, "st")),
+    (("ml",), _linear("volume", 0.001, "ml")),
+    (("l", "litre", "litres", "liter", "liters"), _linear("volume", 1, "l")),
+    (("floz",), _linear("volume", 0.0284130625, "fl oz")),             # UK
+    (("pt", "pint", "pints"), _linear("volume", 0.56826125, "pt")),     # UK
+    (("gal", "gallon", "gallons"), _linear("volume", 4.54609, "gal")),  # UK
+    (("usgal",), _linear("volume", 3.785411784, "US gal")),
+    (("ms", "mps"), _linear("speed", 1, "m/s")),
+    (("kmh", "kph"), _linear("speed", 1 / 3.6, "km/h")),
+    (("mph",), _linear("speed", 0.44704, "mph")),
+    (("kn", "kt", "kts", "knot", "knots"), _linear("speed", 1852 / 3600, "kn")),
+    (("hpa", "mb", "mbar"), _linear("pressure", 1, "hPa")),
+    (("inhg",), _linear("pressure", 33.8638866667, "inHg")),
+    (("mmhg",), _linear("pressure", 1.33322387415, "mmHg")),
+    (("psi",), _linear("pressure", 68.9475729318, "psi")),
+    (("bar",), _linear("pressure", 1000, "bar")),
+    (("mw",), _linear("power", 0.001, "mW")),
+    (("w", "watt", "watts"), _linear("power", 1, "W")),
+    (("kw",), _linear("power", 1000, "kW")),
+    (("dbm",), ("power", lambda v: 10 ** ((v - 30) / 10), _dbm_from_w, "dBm")),
+    (("hz",), _linear("freq", 1, "Hz")),
+    (("khz",), _linear("freq", 1e3, "kHz")),
+    (("mhz",), _linear("freq", 1e6, "MHz")),
+    (("ghz",), _linear("freq", 1e9, "GHz")),
+    (("c", "degc", "celsius"), ("temp", lambda v: v, lambda b: b, "°C")),
+    (("f", "degf", "fahrenheit"), ("temp", lambda v: (v - 32) * 5 / 9, lambda b: b * 9 / 5 + 32, "°F")),
+    (("k", "kelvin"), ("temp", lambda v: v - 273.15, lambda b: b + 273.15, "K")),
+]:
+    for _name in _names:
+        UNITS[_name] = _unit
+
+# What to convert to when only one unit is given
+CONV_DEFAULT_TO = {
+    "mm": "in", "cm": "in", "m": "ft", "km": "mi", "in": "cm", "ft": "m", "yd": "m", "mi": "km",
+    "nmi": "km", "g": "oz", "kg": "lb", "oz": "g", "lb": "kg", "st": "kg", "ml": "floz", "l": "pt",
+    "floz": "ml", "pt": "l", "gal": "l", "usgal": "l", "ms": "mph", "kmh": "mph", "mph": "kmh",
+    "kn": "mph", "hpa": "inhg", "inhg": "hpa", "mmhg": "hpa", "psi": "bar", "bar": "psi",
+    "mw": "dbm", "w": "dbm", "kw": "dbm", "dbm": "w", "c": "f", "f": "c", "k": "c",
+    "hz": "m", "khz": "m", "mhz": "m", "ghz": "m",
+}
+CONV_WORDS = {"to", "in", "into", "as", "->", ">", "="}
+CONV_RE = re.compile(r"^(-?(?:\d+\.?\d*|\.\d+))\s*(.*)$")
+CONV_USAGE = "Use !conv <n> <unit> [unit], e.g. !conv 10 mi km, !conv 20 c, !conv 5 w dbm"
+SPEED_OF_LIGHT = 299_792_458
+
+
+def _unit_key(token: str) -> str:
+    """'°C' -> 'c', 'km/h' -> 'kmh'."""
+    return token.lower().replace("°", "").replace("/", "")
+
+
+def _num(v: float) -> str:
+    """About 4 significant figures, no exponent: 16.09, 0.3454, 1609."""
+    if v == 0:
+        return "0"
+    digits = min(10, max(0, 3 - math.floor(math.log10(abs(v)))))
+    text = f"{v:.{digits}f}"
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return "0" if text == "-0" else text
+
+
+def _with_unit(v: float, label: str) -> str:
+    return _num(v) + ("" if label.startswith("°") else " ") + label
+
+
+def convert_units(arg: str) -> str:
+    """!conv 10 mi km, !conv 10mi to km, !conv 20 c (to °F), !conv 868 mhz (wavelength)."""
+    m = CONV_RE.match(arg.strip().replace(",", ""))
+    if not m:
+        return CONV_USAGE
+    value = float(m.group(1))
+    tokens = " ".join(m.group(2).lower().replace("fl oz", "floz").split()).split()
+    tokens = [_unit_key(t) for t in tokens]
+    if len(tokens) == 3 and tokens[1] in CONV_WORDS:
+        tokens.pop(1)
+    if not 1 <= len(tokens) <= 2:
+        return CONV_USAGE
+    src = tokens[0]
+    dst = tokens[1] if len(tokens) == 2 else CONV_DEFAULT_TO.get(src, "")
+    for name in (src, dst):
+        if name not in UNITS:
+            return f"Unknown unit '{name[:20]}'. Try !conv 10 mi km or see !helpfun"
+    s_dim, s_to, _, s_label = UNITS[src]
+    d_dim, _, d_from, d_label = UNITS[dst]
+    try:
+        base = s_to(value)
+        if s_dim == "temp" and base < -273.15:
+            return "That's below absolute zero"
+        if s_dim == d_dim:
+            result = d_from(base)
+        elif {s_dim, d_dim} == {"freq", "length"}:     # frequency <-> wavelength
+            if base <= 0:
+                return "Frequency and wavelength must be above 0"
+            result = d_from(SPEED_OF_LIGHT / base)
+            if len(tokens) == 1 and result < 1:       # 868 MHz reads better as 34.54 cm
+                result, d_label = result * 100, "cm"
+        else:
+            return f"Can't convert {s_label} to {d_label}"
+    except (ValueError, OverflowError) as e:
+        return f"Can't convert: {e}"
+    icon = "📐 " if USE_EMOJI else ""
+    return f"{icon}{_with_unit(value, s_label)} = {_with_unit(result, d_label)}"
+
+
 async def run_command(cmd: str, arg: str, sender_name: str, rx_info: dict[str, Any],
                       target: Optional[tuple[str, Any]] = None) -> Optional[str]:
     """target is where the reply goes, ("chan", idx) or ("dm", pubkey prefix). !warn watches it."""
@@ -2324,8 +2470,10 @@ async def run_command(cmd: str, arg: str, sender_name: str, rx_info: dict[str, A
         start = sender_position(contacts, name=sender_name, key_prefix=dm_key)
         return mention + format_dist(rx_info, contacts, start, bot_position(),
                                      budget=MAX_REPLY_BYTES - len(mention.encode("utf-8")))
-    if cmd == "!help":
-        return help_text()
+    if cmd.startswith("!help"):
+        return help_text(cmd[5:] or arg)
+    if cmd == "!conv":
+        return mention + convert_units(arg)
     if cmd == "!roll":
         return mention + roll_dice(arg)
     if cmd == "!flipacoin":

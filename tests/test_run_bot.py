@@ -27,6 +27,11 @@ import run_bot as bot
     ("!wxf", ("!wxf", "")),
     ("help", ("", "")),
     ("!help", ("!help", "")),
+    ("!helpwx", ("!helpwx", "")),
+    ("!help fun", ("!help", "fun")),
+    ("!conv 10 mi km", ("!conv", "10 mi km")),
+    ("!convert 20 c", ("!conv", "20 c")),
+    ("conv 10 mi km", ("", "")),
     ("!dice 2d6", ("!roll", "2d6")),
     ("!8ball will it rain", ("!eightball", "will it rain")),
     ("!coin", ("!flipacoin", "")),
@@ -543,8 +548,57 @@ def test_dist_command(monkeypatch):
 
 def test_help_fits_one_message(monkeypatch):
     monkeypatch.setattr(bot, "MET_OFFICE_API_KEY", "key")
-    assert "!path" in bot.help_text()
-    assert len(bot.help_text().encode("utf-8")) <= bot.MAX_REPLY_BYTES
+    for topic in ("",) + bot.HELP_TOPICS:
+        assert len(bot.help_text(topic).encode("utf-8")) <= bot.MAX_REPLY_BYTES
+    for topic in bot.HELP_TOPICS:
+        assert f"!help{topic}" in bot.help_text()
+
+
+def test_help_topics(monkeypatch):
+    monkeypatch.setattr(bot, "MET_OFFICE_API_KEY", "key")
+    assert "!path" in bot.help_text("test")
+    assert "!conv" in bot.help_text("fun") and "!roll" in bot.help_text("fun")
+    assert "!hf" in bot.help_text("radio")
+    # !helpwx and !help wx give the same reply, an unknown topic gives the topic list
+    assert asyncio.run(bot.run_command("!helpwx", "", "Alice", {})) == bot.help_text("wx")
+    assert asyncio.run(bot.run_command("!help", "wx", "Alice", {})) == bot.help_text("wx")
+    assert asyncio.run(bot.run_command("!help", "nonsense", "Alice", {})) == bot.help_text()
+
+
+@pytest.mark.parametrize("arg, expected", [
+    ("10 mi km", "📐 10 mi = 16.09 km"),
+    ("10mi to km", "📐 10 mi = 16.09 km"),
+    ("5 ft in", "📐 5 ft = 60 in"),                  # "in" after a unit is inches
+    ("5 ft in m", "📐 5 ft = 1.524 m"),
+    ("1,000 m km", "📐 1000 m = 1 km"),
+    ("20 c", "📐 20°C = 68°F"),                     # one unit uses its usual partner
+    ("20 °C °F", "📐 20°C = 68°F"),
+    ("-40 f c", "📐 -40°F = -40°C"),
+    ("300 k", "📐 300 K = 26.85°C"),
+    ("3 kg lb", "📐 3 kg = 6.614 lb"),
+    ("5 st", "📐 5 st = 31.75 kg"),
+    ("1 fl oz ml", "📐 1 fl oz = 28.41 ml"),
+    ("50 km/h mph", "📐 50 km/h = 31.07 mph"),
+    ("1013 hpa", "📐 1013 hPa = 29.91 inHg"),
+    ("5 w dbm", "📐 5 W = 36.99 dBm"),
+    ("20 dbm", "📐 20 dBm = 0.1 W"),
+    ("868 mhz", "📐 868 MHz = 34.54 cm"),          # wavelength
+    ("14.2 mhz m", "📐 14.2 MHz = 21.11 m"),
+    ("2 m mhz", "📐 2 m = 149.9 MHz"),
+])
+def test_convert_units(arg, expected):
+    assert bot.convert_units(arg) == expected
+
+
+def test_convert_units_errors(monkeypatch):
+    assert bot.convert_units("").startswith("Use !conv")
+    assert bot.convert_units("ten mi km").startswith("Use !conv")
+    assert bot.convert_units("10 foo").startswith("Unknown unit 'foo'")
+    assert bot.convert_units("10 km kg") == "Can't convert km to kg"
+    assert bot.convert_units("-300 c") == "That's below absolute zero"
+    assert bot.convert_units("0 w dbm").startswith("Can't convert")
+    monkeypatch.setattr(bot, "USE_EMOJI", False)
+    assert asyncio.run(bot.run_command("!conv", "10 mi km", "Alice", {})) == "@[Alice] 10 mi = 16.09 km"
 
 
 # ---------- commands ----------
@@ -657,10 +711,10 @@ def test_no_api_key_skips_weather(monkeypatch):
     assert bot.command_allowed("!warn", admin=False)
     assert asyncio.run(bot.get_weather("Cromer")) is None
     assert asyncio.run(bot.expand_tokens("Morning {wx} {wxf:Cromer}")).strip() == "Morning"
-    help_text = bot.help_text()
-    assert "!wx" not in help_text and "!dist, !warn/!sun/" in help_text
+    help_text = bot.help_text("wx")
+    assert "!wx" not in help_text and "Weather: !warn" in help_text
     monkeypatch.setattr(bot, "MET_OFFICE_API_KEY", "key")
-    assert "!dist, !wx/!wxh/!wxf/!warn/!sun/" in bot.help_text()
+    assert "Weather: !wx now, !wxh hourly, !wxf 3-day, !warn" in bot.help_text("wx")
     assert bot.command_allowed("!wx", admin=False)
 
 
@@ -998,7 +1052,8 @@ def test_stats_and_uptime_are_admin_only(monkeypatch):
         assert not bot.command_allowed(cmd, admin=False)
         assert bot.command_allowed(cmd, admin=True)
     assert bot.command_allowed("!wx", admin=False)
-    assert "!stats" not in bot.help_text() and "!uptime" not in bot.help_text()
+    for topic in ("",) + bot.HELP_TOPICS:
+        assert "!stats" not in bot.help_text(topic) and "!uptime" not in bot.help_text(topic)
 
 
 def test_mute_and_unmute(monkeypatch):
