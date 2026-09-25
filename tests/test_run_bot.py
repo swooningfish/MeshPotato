@@ -552,11 +552,20 @@ def test_ping_shows_only_hops(monkeypatch):
 
 def test_test_shows_rx_report(monkeypatch):
     info = {"path_len": 2, "path_nodes": ["a1", "b2"], "snr": 7.5, "rssi": -85}
+    monkeypatch.setattr(bot, "_radio", None)
+    monkeypatch.setattr(bot, "LOCATIONS", {"Norwich": NORWICH})
     monkeypatch.setattr(bot, "DEFAULT_LOCATION", "Norwich")
-    assert asyncio.run(bot.run_command("test", "", "", info)) == \
-        "Test OK (2 hops) SNR 7.5dB RSSI -85dBm RX from Norwich"
+    # Sender's position unknown: no distance
+    assert asyncio.run(bot.run_command("test", "", "Bob", info, ("chan", 1))) == \
+        "@[Bob] RX in Norwich | (2 hops) SNR 7.5dB RSSI -85dBm"
+    # Sender advertises a position (Cromer), bot at Norwich
+    monkeypatch.setattr(bot, "_radio", type("Radio", (), {"contacts": GPS_CONTACTS, "self_info": {}})())
+    assert asyncio.run(bot.run_command("test", "", "Alice", info, ("chan", 1))) == \
+        "@[Alice] RX in Norwich | (2 hops) SNR 7.5dB RSSI -85dBm | 34km"
+    assert asyncio.run(bot.run_command("test", "", "", info, ("dm", "d4dd00"))) == \
+        "RX in Norwich | (2 hops) SNR 7.5dB RSSI -85dBm | 34km"
     monkeypatch.setattr(bot, "DEFAULT_LOCATION", "")
-    assert asyncio.run(bot.run_command("test", "", "", info)) == "Test OK (2 hops) SNR 7.5dB RSSI -85dBm"
+    assert asyncio.run(bot.run_command("test", "", "", info)) == "Test OK | (2 hops) SNR 7.5dB RSSI -85dBm"
 
 
 def test_wx_unknown_place_is_silent(monkeypatch):

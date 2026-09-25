@@ -6,7 +6,7 @@ Built on the patterns in meshcore_py/examples/serial_pingbot.py and meshcore_py/
 
 Commands (channel or direct message):
   ping               -> Pong with hop count         (whole message, a leading ! is optional)
-  test               -> Test OK with hop count, SNR, RSSI and the bot's DEFAULT_LOCATION (same rules as ping)
+  test               -> RX in DEFAULT_LOCATION, hop count, SNR, RSSI and your distance (same rules as ping)
   !path / !trace     -> The repeaters your message came through, with names where known
   !dist              -> Distance of each leg along that path, for repeaters with a known position
   !wx [location]     -> Current conditions from Met Office DataHub (hourly)
@@ -2305,15 +2305,20 @@ async def run_command(cmd: str, arg: str, sender_name: str, rx_info: dict[str, A
     mention = f"@[{sender_name}] " if sender_name else ""
     if cmd == "ping":
         return f"{mention}{'🏓 ' if USE_EMOJI else ''}Pong {format_hops(rx_info)}"
+    contacts = getattr(_radio, "contacts", None) or {}
+    dm_key = target[1] if target and target[0] == "dm" else ""
     if cmd == "test":
-        where = f" RX from {DEFAULT_LOCATION}" if DEFAULT_LOCATION.strip() else ""
-        return f"{mention}Test OK {format_rx_report(rx_info)}{where}"
+        # '@[Alice] RX in Norwich | (2 hops) SNR 7.5dB RSSI -85dBm | 34km'
+        parts = [f"RX in {DEFAULT_LOCATION.strip()}" if DEFAULT_LOCATION.strip() else "Test OK",
+                 format_rx_report(rx_info)]
+        start, end = sender_position(contacts, name=sender_name, key_prefix=dm_key), bot_position()
+        if start and end:
+            parts.append(_distance(haversine_km(start, end)))
+        return mention + " | ".join(parts)
     if cmd == "!path":
         return mention + format_path(rx_info, repeater_names(),
                                      budget=MAX_REPLY_BYTES - len(mention.encode("utf-8")))
     if cmd == "!dist":
-        contacts = getattr(_radio, "contacts", None) or {}
-        dm_key = target[1] if target and target[0] == "dm" else ""
         start = sender_position(contacts, name=sender_name, key_prefix=dm_key)
         return mention + format_dist(rx_info, contacts, start, bot_position(),
                                      budget=MAX_REPLY_BYTES - len(mention.encode("utf-8")))

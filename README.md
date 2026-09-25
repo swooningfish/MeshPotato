@@ -90,7 +90,7 @@ Send `!help` on the mesh for the command list.
 | Command | What you get |
 |---------|--------------|
 | `ping` | `🏓 Pong (2 hops)` |
-| `test` | Hops, SNR, RSSI and where the bot heard you |
+| `test` | Where the bot heard you, hops, SNR, RSSI and your distance |
 | `!path` | The repeaters your message came through |
 | `!dist` | Distance of each leg along that path |
 | `!wx [place]` | Current weather |
@@ -457,10 +457,12 @@ To see every message the bot hears, set `log_level = "DEBUG"` in `config.toml`, 
 | Command | Reply |
 |---------|-------|
 | `ping` | `@[You] 🏓 Pong (2 hops)` |
-| `test` | `@[You] Test OK (2 hops) SNR 7.5dB RSSI -85dBm RX from Norwich` |
+| `test` | `@[You] RX in Norwich \| (2 hops) SNR 7.5dB RSSI -85dBm \| 34km` |
 
-`test` gives the hop count, signal report and where the bot heard it (`default_location`).
+`test` gives where the bot heard you (`default_location`), the hop count, the signal report and how far away you are.
 
+- The distance is a straight line from your advertised position to the bot's, found the same way as for `!dist`. It is left out when either position isn't known. It uses km, or miles with `dist_miles = true`.
+- With no `default_location` set, the reply starts `Test OK` instead of `RX in …`.
 - The hop count comes from the message itself. The path addresses aren't shown (use `!path`), because a long path makes the reply too long for one message.
 - SNR and RSSI come from the message when the radio reports them. Otherwise they come from the radio's receive log for the same packet. Values the radio doesn't report are left out.
 - A message that came by a direct route shows `(direct route)`.
