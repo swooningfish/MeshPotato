@@ -21,7 +21,7 @@ nano config.toml
 ```
 
 - Every line in the example starts with `#`, which means "use the default". Remove the `#` and edit the value to change a setting.
-- Don't edit `run_bot.py`. `config.toml` is ignored by git, so `git pull` never clashes with your changes.
+- Don't edit `run_bot.py` or the files in `meshpotato/`. `config.toml` is ignored by git, so `git pull` never clashes with your changes.
 - After changing it, restart the bot: `sudo systemctl restart meshcore-meshpotato-bot`.
 - The bot reads `config.toml` from its own folder. To use another file, pass `--config /path/to/file.toml` or set `MESHPOTATO_CONFIG`.
 - A misspelled setting is logged and ignored. A value of the wrong type (such as `"yes"` instead of `true`) stops the bot at startup with a message naming the setting.

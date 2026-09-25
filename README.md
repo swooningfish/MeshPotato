@@ -244,7 +244,8 @@ To see every message the bot hears, set `log_level = "DEBUG"` in `config.toml`, 
 
 | File | Purpose |
 |------|---------|
-| `run_bot.py` | The bot |
+| `run_bot.py` | Starts the bot |
+| `meshpotato/` | The bot's code, one module per feature (`wx.py`, `mail.py`, `commands.py` and so on) |
 | `config.example.toml` | Example settings. Copy it to `config.toml` |
 | `channel_list.py` | Lists the channels on your radio |
 | `install_mesh_potato_bot_service.sh` | Installs the bot as a service |

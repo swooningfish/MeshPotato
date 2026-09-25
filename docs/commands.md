@@ -166,6 +166,8 @@ Add your own topics, such as local repeaters, with `[freq_lists]` in `config.tom
 
 Check these lists against current band plans before relying on them. Amateur and marine VHF need a licence to transmit, except in a real emergency.
 
+Aliases: `!freqs`, `!frequency`.
+
 ## Weather (!wx, !wxh, !wxf)
 
 Needs a Met Office API key. Without one, these commands are ignored.
@@ -422,6 +424,8 @@ Admins are the public keys listed in `admin_pubkeys` in `config.toml` (the first
 | `!listmailuser` | List who can use `!mail` |
 | `!stats` | Commands served, messages heard and sent, API calls, radio battery |
 | `!uptime` | How long the bot and the Pi have been running |
+
+Aliases: `!addmailusers`, `!removemailusers`, `!listmailusers`.
 
 ```
 📊 Cmds 42 (wx 20, ping 12, test 5) | Heard 310 | Sent 45 | Limited 3 | WX API 18/300 | 🔋4.02V
