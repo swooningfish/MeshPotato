@@ -6,6 +6,7 @@ What it can do:
 
 - 🏓 **Signal checks:** `ping`, `test` and `!path` show hops, SNR, RSSI and the repeaters your message went through
 - 👥 **Who's about:** `!who`, `!status`, `!bearing` and `!freq` show who the bot has heard, where they are and which frequencies to try. They work without internet
+- 📮 **Mailbox:** `!mail` leaves a message for someone out of range. The bot passes it on by DM the next time it hears them
 - 🌦️ **Weather:** current weather, hourly outlook and 3-day forecast from the Met Office, plus weather warnings with automatic change alerts
 - 🌅 **Sky:** sunrise, sunset, moon phase and aurora alerts
 - 🌼 **Air:** air quality and pollen forecasts
@@ -98,6 +99,8 @@ Send `!help` on the mesh for the list of help topics, then `!helptest`, `!helpne
 | `!status <name>` | When the bot last heard someone, and where they are |
 | `!bearing <name or place>` | Distance and compass direction to a contact or place |
 | `!freq [topic]` | Frequency lists: PMR446, CB, ham, HF emergency, marine, air band, this mesh |
+| `!mail <name> <message>` | In a DM to the bot: leave a message, sent by DM the next time the bot hears them |
+| `!clearmail [name]` | In a DM to the bot: cancel your waiting messages, to everyone or to one person |
 | `!wx [place]` | Current weather |
 | `!wxh [place]` | Hour-by-hour outlook |
 | `!wxf [place]` | 3-day forecast |
@@ -128,7 +131,7 @@ Send `!help` on the mesh for the list of help topics, then `!helptest`, `!helpne
 | A UK town or village | `!wx Cromer` |
 | Latitude,longitude | `!wx 52.63,1.30` |
 
-Admins also get `!mute`, `!unmute`, `!say`, `!save`, `!stats` and `!uptime`, in direct messages only. See [Admin commands](#admin-commands).
+Admins also get `!mute`, `!unmute`, `!say`, `!save`, `!stats`, `!uptime`, `!addmailuser`, `!removemailuser` and `!listmailuser`, in direct messages only. See [Admin commands](#admin-commands).
 
 Full details, example replies and what every emoji means are in the [Command reference](#command-reference).
 
@@ -532,25 +535,67 @@ A node only has a position if its owner has set one and it is included in its ad
 | `!who` | `@[You] 👥 4 heard in 24h: Alice 2m, Bob 15m, Carol 3h, Dave 20h` |
 | `!who 2` | Only people heard in the last 2 hours |
 | `!who rpt` | `@[You] 👥 2 repeaters heard in 24h: Aylsham RPT 10m, Hill Top 4h` |
-| `!status alice` | `@[You] 👤 Alice: heard 2m ago on ch1, 2 hops, SNR 7.5dB \| 📍 34km N of bot` |
+| `!status bob` | `@[You] 👤 Bob: heard 3h ago by advert \| 📍 34km N of bot` |
+| `!status alice` | `@[You] 👤 Alice: heard 2m ago by DM, 2 hops, SNR 7.5dB` |
+| `!status b0b0` | Look someone up by the start of their public key |
 | `!status dave` | `@[You] 👤 Dave: last advert 2h ago` |
 
 Aliases: `!heard` = `!who`, `!seen` and `!lastheard` = `!status`.
 
-The bot keeps a list of every node it hears:
+The bot keeps a list of the nodes it hears, by **public key**:
 
-- **Messages** on the channels it listens to, from the sender's name, with the hops and SNR.
-- **DMs** to the bot, when the sender is in the bot's contacts.
-- **Adverts** from companions and repeaters in the bot's contacts. `!who` lists people. `!who rpt` lists repeaters, which is a quick way to see which parts of the mesh are still up.
+- **Adverts** from companions and repeaters in the bot's contacts. Adverts are signed with the node's key, so the bot knows who sent them.
+- **DMs** to the bot, when the sender is in the bot's contacts. A DM is encrypted to the sender's key, so that's proof too.
+
+Channel messages aren't counted. They only carry the sender's name, which anyone can set, so they can't prove who is about. Someone who only chats on a channel shows up once the bot hears their advert.
+
+`!who` lists people. `!who rpt` lists repeaters, which is a quick way to see which parts of the mesh are still up.
 
 Notes:
 
-- Each node is listed once, with its latest name and time. Names that differ only by emoji or symbols, such as `Sam 🐬 Base` and `Sam 🐟 Base`, count as the same node. So does a node that is renamed but keeps its key, when the bot knows the key from a DM, an advert or its contacts.
-- `!status` matches the whole name first, then the start of a name, then any part of it. If several match, it lists them.
+- Each node is listed once, with its latest name and time. A node that is renamed keeps its key, so it stays one entry. Two radios with the same name stay separate, and `!status` lists them with the start of each key, such as `Bob b0b0, Bob b1b1`.
+- If the reply is too long, names are shortened, then the last ones are left off (`+3 more`).
+- `!status` matches the whole name first, then the start of a name, then any part of it, then the start of a key. If several match, it lists them.
 - If the bot hasn't heard someone itself, `!status` falls back to the last advert time in its contacts. That time comes from the other node's clock, so treat it as a rough guide.
 - The position is the one in the node's advert, measured from the bot as for `!dist`.
 - The list is kept in memory. To spare the Pi's SD card, `heard.json` next to `run_bot.py` is only read when the bot starts and written when it stops (`systemctl stop` or `restart`, Ctrl+C, or a clean reboot). A power cut or crash loses what was heard since the bot started, so if the power is about to go, an admin can send `!save` to write it straight away. Nodes not heard for 7 days are dropped. See `who_hours`, `heard_keep_days` and `heard_file` in the [Settings reference](#settings-reference).
 - Times use the Pi's clock. Without internet the Pi can't set its clock, so fit a real-time clock or GPS if you rely on this offline.
+
+### Mailbox (!mail)
+
+`!mail` only works in a **DM to the bot**. On a channel the bot replies `📮 !mail only works in a DM to the bot`.
+
+| DM to the bot | Reply |
+|---------------|-------|
+| `!mail bob see you at the hall at 8` | `📮 Held for Bob (1/10), sent by DM when the bot next hears them` |
+| `!mail @[Sam 🐬 Base] on my way` | `📮 Held for Sam 🐬 Base (1/10), sent by DM when the bot next hears them` |
+| `!mail` | `📮 Use !mail <name> <message>. Waiting: Bob 2, Sam 🐬 Base 1. !clearmail to cancel` |
+| `!clearmail bob` | `📮 Cleared 2 messages to Bob` |
+| `!clearmail` | `📮 Cleared 3 waiting messages` |
+
+What the recipient gets, by DM from the bot:
+
+```
+📬 Alice 2h ago: see you at the hall at 8
+```
+
+Aliases: `!msg` and `!leave` = `!mail`. `!mailclear` and `!unmail` = `!clearmail`.
+
+How it works:
+
+- The bot holds the message and sends it by DM the next time it hears the recipient's **public key**: an advert (signed by their key) or a DM to the bot (encrypted to it). Then the message is dropped from the mailbox.
+- A channel message does **not** trigger delivery. It only carries a name, so otherwise someone could take the recipient's name and have their mail sent while they're out of range.
+- **Who can send mail:** only approved users, whose public keys an admin has added with `!addmailuser` (see [Admin commands](#admin-commands)). Admins can always send. Anyone else gets `📮 !mail is only for approved users. Ask an admin to add you`.
+- **Why DMs only:** a DM is encrypted to the sender's key, so the bot knows who sent it. A channel message only carries a name, which anyone can set, so someone could pass as an approved user.
+- **Who can get mail:** only companions in the bot's contacts, because the bot needs their key to send a DM. Repeaters can't. Recipients don't need approving.
+- **The name:** use the whole contact name (emoji optional, so `sam base` finds `Sam 🐬 Base`), an `@[mention]`, or the first word of one name when only one contact starts with it. If several match, the bot lists them.
+- **Limits:** up to 10 messages from each sender to each recipient (`mail_max_per_pair`), 30 from each sender in all (`mail_max_per_sender`), 200 in the mailbox (`mail_max_total`), 100 bytes each (`mail_max_bytes`). A sender at a limit can leave more once some are delivered. Messages not delivered in 7 days are dropped (`mail_keep_days`). The usual rate limit of 3 commands a minute applies to `!mail` too.
+- **Privacy:** both DMs, to the bot and to the recipient, are private. `mail.json` on the Pi holds the text of waiting messages.
+- **Delivery:** the bot hands the DM to the radio and counts it as delivered. It doesn't wait for the recipient's radio to confirm it. If the bot only just heard them, for example from a distant advert, the DM can still be lost.
+- **Cancelling:** `!clearmail` cancels all your messages that haven't been delivered yet, and `!clearmail <name>` only the ones to that person. The name is matched against the people you have mail waiting for (emoji optional), or give the start of their key. It only touches your own messages, and works even if an admin has since removed you from the approved users. Like `!mail`, it only works in a DM to the bot.
+- **Busy bot:** the bot only takes as many messages as its send queue has room for, keeping 5 places free for replies. The rest stay in the mailbox until the recipient is heard again, so a full queue never loses mail.
+- **Mute:** while the bot is muted, mail waits and goes out the next time the recipient is heard after the mute ends.
+- **Saving:** like the heard list, the mailbox is kept in memory. `mail.json` is read when the bot starts and written when it stops, or when an admin sends `!save`. A power cut loses messages left since the last save.
 
 ### Bearing (!bearing)
 
@@ -935,7 +980,10 @@ These only work in a **direct message** from a key in `admin_pubkeys`. Anyone el
 | `!mute` | Shows whether the bot is muted and for how long |
 | `!mute 0` / `!unmute` | Ends the mute early |
 | `!say <ch> <text>` | Posts the text to a channel slot as the bot: `!say 1 Net starts 20:00` |
-| `!save` | Writes the `!who` / `!status` heard list to `heard.json` now: `💾 Saved 12 nodes to heard.json` |
+| `!save` | Writes the heard list (`heard.json`) and the `!mail` box (`mail.json`) now: `💾 12 nodes saved, 3 messages unchanged` |
+| `!addmailuser <public key>` | Lets that key use `!mail`. Give at least the first 12 hex characters: `📮 Bob can now use !mail (3 users)` |
+| `!removemailuser <public key>` | Stops that key using `!mail`. The start of the key is enough if only one user matches |
+| `!listmailuser` | Lists the approved keys, with names from the contacts: `📮 2 mail users: Bob b0b0b0b0b0b0, 1c2d3e4f5a6b` |
 | `!stats` | Commands served, messages heard and sent, rate limited commands, Met Office calls today, radio battery |
 | `!uptime` | How long the bot and the Pi have been running |
 
@@ -1025,10 +1073,17 @@ The bot reads `config.toml` from the folder `run_bot.py` is in. To use another f
 | `roll_max_dice` | `10` | Most dice per `!roll` |
 | `roll_max_sides` | `1000` | Most sides per die |
 | `eightball_answers` | 19 answers | List of `!eightball` replies |
-| **Who's about and frequencies** | | |
+| **Who's about, mail and frequencies** | | |
 | `who_hours` | `24` | How far back `!who` looks when no hours are given |
 | `heard_keep_days` | `7` | Forget a node not heard for this many days |
 | `heard_file` | `"heard.json"` | Where the heard list is saved. A relative path is next to `run_bot.py` |
+| `mail_max_per_pair` | `10` | Most `!mail` messages waiting from one sender to one recipient |
+| `mail_max_per_sender` | `30` | Most `!mail` messages waiting from one sender to everyone |
+| `mail_max_total` | `200` | Most `!mail` messages waiting in all |
+| `mail_keep_days` | `7` | Drop a message not delivered in this many days |
+| `mail_max_bytes` | `100` | Longest `!mail` message. Keep it under `max_reply_bytes` less about 35 |
+| `mail_users_file` | `"authed_mail_users.json"` | Keys allowed to use `!mail`. Written straight away when an admin adds or removes one |
+| `mail_file` | `"mail.json"` | Where the mailbox is saved. A relative path is next to `run_bot.py` |
 | `[freq_lists]` | pmr, cb, ham, hf, marine, air | `!freq` topics, such as `local = "GB3XX 145.7250 -600k"`. Adds to the built-in topics or replaces one with the same name. `""` removes one |
 | **Rate limits and admin** | | |
 | `rate_limit_per_user` | `[3, 60]` | [max commands, seconds] |
@@ -1158,7 +1213,9 @@ Rules:
 | `channel_list.py` | Lists the channels on your radio, with their slot numbers |
 | `tests/` | Tests for the bot, run with pytest |
 | `heard.json` | Created by the bot: who it has heard, for `!who` and `!status` |
-| `.gitignore` | Keeps your API key, `config.toml`, `heard.json` and Python caches out of git |
+| `mail.json` | Created by the bot: `!mail` messages waiting to be delivered |
+| `authed_mail_users.json` | Created by the bot: the keys allowed to use `!mail` |
+| `.gitignore` | Keeps your API key, `config.toml`, `heard.json`, `mail.json`, `authed_mail_users.json` and Python caches out of git |
 
 ---
 

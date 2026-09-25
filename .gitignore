@@ -27,6 +27,10 @@ meshbot/
 nohup.out
 heard.json
 heard.json.tmp
+mail.json
+mail.json.tmp
+authed_mail_users.json
+authed_mail_users.json.tmp
 
 # Editors and OS
 .vscode/

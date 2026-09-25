@@ -58,6 +58,8 @@ import run_bot as bot
     ("!brg NR1", ("!bearing", "NR1")),
     ("!freq pmr", ("!freq", "pmr")),
     ("!helpnet", ("!helpnet", "")),
+    ("!mail Bob see you at 8", ("!mail", "Bob see you at 8")),
+    ("!msg @[Sam] hi", ("!mail", "@[Sam] hi")),
     ("who", ("", "")),
     ("!nothing", ("", "")),
     ("", ("", "")),
@@ -587,57 +589,43 @@ HEARD_NOW = 1_800_000_000.0
 
 def _heard():
     h = bot.Heard()
-    h.record("Alice", "ch1", {"path_len": 2, "snr": 7.5}, now=HEARD_NOW - 120)
-    h.record("Bob", "dm", {"direct": True, "snr": -3.25}, key="B0B0", now=HEARD_NOW - 3 * 3600)
-    h.record("Aylsham RPT", "advert", key="a1ff00", repeater=True, now=HEARD_NOW - 600)
-    h.record("Carol", "advert", now=HEARD_NOW - 30 * 3600)
+    h.record("Alice", "dm", "a1a1", {"path_len": 2, "snr": 7.5}, now=HEARD_NOW - 120)
+    h.record("Bob", "dm", "B0B0", {"direct": True, "snr": -3.25}, now=HEARD_NOW - 3 * 3600)
+    h.record("Aylsham RPT", "advert", "a1ff00", repeater=True, now=HEARD_NOW - 600)
+    h.record("Carol", "advert", "c4c4", now=HEARD_NOW - 30 * 3600)
     return h
 
 
-def test_heard_record_keeps_key():
+def test_heard_keyed_by_public_key():
     h = _heard()
-    h.record("bob", "ch3", {"path_len": 1}, now=HEARD_NOW)
-    assert h.nodes["bob"] == {"name": "bob", "at": HEARD_NOW, "via": "ch3", "key": "b0b0", "path_len": 1}
-    h.record("  ", "ch1")
+    assert set(h.nodes) == {"a1a1", "b0b0", "a1ff00", "c4c4"}
+    # A key is required: a name on its own is never recorded
+    h.record("Mallory", "advert", "")
+    h.record("  ", "dm", "d4d4")
     assert len(h.nodes) == 4
-
-
-def test_heard_same_person_new_emoji():
-    h = bot.Heard()
-    h.record("Sam 🐟 Base Camp", "ch1", now=HEARD_NOW - 30)
-    h.record("Sam 🐬 Base Camp", "ch1", now=HEARD_NOW)
-    assert list(h.nodes) == ["sam base camp"]
-    assert bot.format_who(h, now=HEARD_NOW) == "👥 1 heard in 24h: Sam 🐬 Base Camp 0s"
-    assert bot.heard_id("🐬🐟") == "🐬🐟"          # all symbols: nothing to strip
 
 
 def test_heard_rename_with_same_key():
     h = bot.Heard()
-    h.record("Old Name", "dm", key="D4DD00AABBCCDDEE", now=HEARD_NOW - 60)
-    h.record("New Name", "advert", key="d4dd00aabbcc", now=HEARD_NOW)
-    assert [e["name"] for e in h.nodes.values()] == ["New Name"]
-    assert h.nodes["new name"]["key"] == "d4dd00aabbcc"
+    h.record("Old Name", "dm", "D4DD00AABBCCDDEE", now=HEARD_NOW - 60)
+    h.record("New Name", "advert", "d4dd00aabbcc", now=HEARD_NOW)
+    assert h.nodes == {"d4dd00aabbcc": {"name": "New Name", "at": HEARD_NOW, "via": "advert", "key": "d4dd00aabbcc"}}
 
 
-def test_heard_load_merges_duplicates(tmp_path):
+def test_heard_load_drops_name_only_entries(tmp_path):
     path = tmp_path / "heard.json"
     path.write_text(json.dumps([
-        {"name": "Sam 🐬 Base Camp", "at": HEARD_NOW, "via": "ch1"},
-        {"name": "Sam 🐟 Base Camp", "at": HEARD_NOW - 30, "via": "ch1"},
+        {"name": "Sam 🐬 Base Camp", "at": HEARD_NOW, "via": "ch1"},             # older version: channel name
         {"name": "Old Name", "at": HEARD_NOW - 99, "via": "dm", "key": "d4dd00aabbcc"},
         {"name": "New Name", "at": HEARD_NOW - 5, "via": "advert", "key": "d4dd00aabbcc"},
+        {"name": 42, "at": HEARD_NOW, "key": "e5e5"},
+        {"name": "Bad key", "at": HEARD_NOW, "key": "not hex"},
+        "junk",
     ]), encoding="utf-8")
     h = bot.Heard()
     h.load(str(path))
-    assert sorted(e["name"] for e in h.nodes.values()) == ["New Name", "Sam 🐬 Base Camp"]
-
-
-def test_format_who_full_names_when_they_fit():
-    h = bot.Heard()
-    h.record("Sam 🐬 Base Camp", "ch1", now=HEARD_NOW)
-    h.record("Alice in Norwich", "ch1", now=HEARD_NOW - 60)
-    assert bot.format_who(h, now=HEARD_NOW) == "👥 2 heard in 24h: Sam 🐬 Base Camp 0s, Alice in Norwich 1m"
-    assert bot.format_who(h, now=HEARD_NOW, budget=60) == "👥 2 heard in 24h: Sam 🐬 Base C 0s, Alice in Nor 1m"
+    assert [e["name"] for e in h.nodes.values()] == ["New Name"]
+    assert h.dirty          # so the next save writes the file without them
 
 
 def test_format_who():
@@ -649,10 +637,18 @@ def test_format_who():
     assert bot.format_who(bot.Heard(), now=HEARD_NOW) == "👥 No people heard in the last 24h"
 
 
+def test_format_who_full_names_when_they_fit():
+    h = bot.Heard()
+    h.record("Sam 🐬 Base Camp", "advert", "5a5a", now=HEARD_NOW)
+    h.record("Alice in Norwich", "dm", "a1a1", now=HEARD_NOW - 60)
+    assert bot.format_who(h, now=HEARD_NOW) == "👥 2 heard in 24h: Sam 🐬 Base Camp 0s, Alice in Norwich 1m"
+    assert bot.format_who(h, now=HEARD_NOW, budget=60) == "👥 2 heard in 24h: Sam 🐬 Base C 0s, Alice in Nor 1m"
+
+
 def test_format_who_fits_budget():
     h = bot.Heard()
     for i in range(30):
-        h.record(f"Node number {i:02d}", "ch1", now=HEARD_NOW - i * 60)
+        h.record(f"Node number {i:02d}", "advert", f"aa{i:02d}", now=HEARD_NOW - i * 60)
     out = bot.format_who(h, now=HEARD_NOW, budget=80)
     assert len(out.encode("utf-8")) <= 80 and out.startswith("👥 30 heard in 24h: Node number 0s")
     assert out.endswith(" more")
@@ -660,16 +656,22 @@ def test_format_who_fits_budget():
 
 def test_format_status():
     h = _heard()
-    assert bot.format_status("alice", h, GPS_CONTACTS, NORWICH, now=HEARD_NOW) == \
-        "👤 Alice: heard 2m ago on ch1, 2 hops, SNR 7.5dB | 📍 34km N of bot"
-    assert bot.format_status("bob", h, {}, NORWICH, now=HEARD_NOW) == \
-        "👤 Bob: heard 3h ago by DM, direct route, SNR -3.25dB"
-    # Found by key, so the position shows
-    assert bot.format_status("aylsham", h, GPS_CONTACTS, NORWICH, now=HEARD_NOW) == \
-        "👤 Aylsham RPT: heard 10m ago by advert | 📍 19km N of bot"
-    assert bot.format_status("a", h, {}, NORWICH, now=HEARD_NOW).startswith("👤 2 match 'a': ")
+    assert bot.format_status("alice", h, {}, NORWICH, now=HEARD_NOW) ==         "👤 Alice: heard 2m ago by DM, 2 hops, SNR 7.5dB"
+    assert bot.format_status("bob", h, {}, NORWICH, now=HEARD_NOW) ==         "👤 Bob: heard 3h ago by DM, direct route, SNR -3.25dB"
+    # The position comes from the contact with that key
+    assert bot.format_status("aylsham", h, GPS_CONTACTS, NORWICH, now=HEARD_NOW) ==         "👤 Aylsham RPT: heard 10m ago by advert | 📍 19km N of bot"
+    assert bot.format_status("a", h, {}, NORWICH, now=HEARD_NOW) == "👤 2 match 'a': Alice a1a1, Aylsham RPT a1ff"
     assert bot.format_status("nobody", h, GPS_CONTACTS, NORWICH, now=HEARD_NOW) == "👤 No one called 'nobody' heard"
     assert bot.format_status("", h, {}, NORWICH, now=HEARD_NOW).startswith("👤 Use !status")
+
+
+def test_format_status_same_name_two_radios():
+    h = _heard()
+    h.record("Bob", "advert", "b1b1", now=HEARD_NOW - 7200)
+    assert bot.format_status("bob", h, {}, NORWICH, now=HEARD_NOW) == "👤 2 match 'bob': Bob b0b0, Bob b1b1"
+    assert bot.format_status("b1b1", h, {}, NORWICH, now=HEARD_NOW) == "👤 Bob: heard 2h ago by advert"
+    contacts = {"x": {"public_key": "e5e5e5", "adv_name": "Dave", "type": 1, "last_advert": HEARD_NOW - 60}}
+    assert bot.format_status("e5e5", h, contacts, NORWICH, now=HEARD_NOW) == "👤 Dave: last advert 1m ago"
 
 
 def test_format_status_from_contact_advert():
@@ -687,10 +689,10 @@ def test_heard_save_load_prune(tmp_path, monkeypatch):
     assert not h.dirty
     loaded = bot.Heard()
     loaded.load(path)
-    assert loaded.nodes == h.nodes
+    assert loaded.nodes == h.nodes and not loaded.dirty
     monkeypatch.setattr(bot, "HEARD_KEEP_DAYS", 1)
     loaded.prune(now=HEARD_NOW)
-    assert set(loaded.nodes) == {"alice", "bob", "aylsham rpt"}
+    assert set(loaded.nodes) == {"a1a1", "b0b0", "a1ff00"}
     (tmp_path / "bad.json").write_text("not json", encoding="utf-8")
     broken = bot.Heard()
     broken.load(str(tmp_path / "bad.json"))
@@ -698,14 +700,255 @@ def test_heard_save_load_prune(tmp_path, monkeypatch):
     assert broken.nodes == {}
 
 
-def test_save_heard(tmp_path):
-    path = str(tmp_path / "heard.json")
-    h = _heard()
-    assert bot.save_heard(h, path) == "💾 Saved 4 nodes to heard.json"
-    assert bot.save_heard(h, path) == "💾 Nothing new to save, 4 nodes already in heard.json"
-    h.record("Zed", "ch1")
-    assert bot.save_heard(h, str(tmp_path / "missing_dir" / "heard.json")) == "💾 Save failed, see the log"
+def test_save_state(tmp_path):
+    heard_file, mail_file = str(tmp_path / "heard.json"), str(tmp_path / "mail.json")
+    h, box = _heard(), bot.Mailbox()
+    box.add("Alice", "name:alice", "Sam", "d4dd00", "hello", now=HEARD_NOW)
+    assert bot.save_state(h, box, heard_file, mail_file) == "💾 4 nodes saved, 1 message saved"
+    assert bot.save_state(h, box, heard_file, mail_file) == "💾 4 nodes unchanged, 1 message unchanged"
+    h.record("Zed", "advert", "e0e0")
+    bad = str(tmp_path / "missing_dir" / "heard.json")
+    assert bot.save_state(h, box, bad, mail_file) == "💾 heard.json failed, 1 message unchanged, see the log"
     assert h.dirty
+
+
+# ---------- !mail ----------
+MAIL_CONTACTS = {
+    "s": {"public_key": "5a5a5a5a5a5a0000", "adv_name": "Sam 🐬 Base", "type": 1},
+    "b": {"public_key": "b0b0b0b0b0b00000", "adv_name": "Bob", "type": 1},
+    "b2": {"public_key": "b1b1b1b1b1b10000", "adv_name": "Bobby Two", "type": 1},
+    "r": {"public_key": "a1ff00a1ff000000", "adv_name": "Sam Hill RPT", "type": 2},
+}
+
+
+@pytest.mark.parametrize("arg, name, text", [
+    ("Bob see you at 8", "Bob", "see you at 8"),
+    ("bob see you at 8", "Bob", "see you at 8"),
+    ("Sam 🐬 Base on my way", "Sam 🐬 Base", "on my way"),
+    ("sam base on my way", "Sam 🐬 Base", "on my way"),        # emoji can be left out
+    ("@[Sam 🐬 Base] on my way", "Sam 🐬 Base", "on my way"),
+    ("sam on my way", "Sam 🐬 Base", "on my way"),             # start of one name (repeaters don't count)
+    ("Bobby Two hi", "Bobby Two", "hi"),
+])
+def test_mail_recipient(arg, name, text):
+    contact, msg, error = bot.mail_recipient(arg, MAIL_CONTACTS)
+    assert (bot._contact_name(contact), msg, error) == (name, text, "")
+
+
+def test_mail_recipient_errors():
+    assert bot.mail_recipient("bo hi", MAIL_CONTACTS)[2] == "2 contacts match 'bo': Bob, Bobby Two"
+    assert bot.mail_recipient("zed hi", MAIL_CONTACTS)[2] == "No contact called 'zed'"
+    assert bot.mail_recipient("@[Zed] hi", MAIL_CONTACTS)[2] == "No contact called 'Zed'"
+    assert bot.mail_recipient("bob", MAIL_CONTACTS) == (None, "", "")
+
+
+def test_mail_queue_and_limits(monkeypatch):
+    box = bot.Mailbox()
+    assert bot.mail("bob see you at 8", "Alice", "name:alice", MAIL_CONTACTS, box) == \
+        "📮 Held for Bob (1/10), sent by DM when the bot next hears them"
+    assert box.messages[0]["to_key"] == "b0b0b0b0b0b0" and box.dirty
+    for i in range(9):
+        bot.mail(f"bob msg {i}", "Alice", "name:alice", MAIL_CONTACTS, box)
+    assert bot.mail("bob one more", "Alice", "name:alice", MAIL_CONTACTS, box) == \
+        "📮 Bob already has 10 from you waiting, the most allowed"
+    # The limit is per sender: someone else can still leave Bob a message
+    assert bot.mail("bob hi", "Carol", "name:carol", MAIL_CONTACTS, box).startswith("📮 Held for Bob (1/10)")
+    assert bot.mail("", "Alice", "name:alice", MAIL_CONTACTS, box) == "📮 Use !mail <name> <message>. Waiting: Bob 10. !clearmail to cancel"
+    assert bot.mail("bob " + "x" * 101, "Alice", "name:alice", MAIL_CONTACTS, box) == \
+        "📮 Too long, 101 bytes. The most is 100"
+    assert bot.mail("bob", "Alice", "name:alice", MAIL_CONTACTS, box) == "📮 Use !mail <name> <message>"
+    monkeypatch.setattr(bot, "MAIL_MAX_TOTAL", 11)
+    assert bot.mail("sam hi", "Dee", "name:dee", MAIL_CONTACTS, box) == "📮 The mailbox is full, try again later"
+
+
+def test_mail_take_for():
+    box = bot.Mailbox()
+    box.add("Alice", "name:alice", "Sam 🐬 Base", "5a5a5a5a5a5a", "one", now=HEARD_NOW - 60)
+    box.add("Carol", "name:carol", "Sam 🐬 Base", "5a5a5a5a5a5a", "two", now=HEARD_NOW - 30)
+    box.add("Alice", "name:alice", "Bob", "b0b0b0b0b0b0", "for bob", now=HEARD_NOW)
+    box.dirty = False
+    assert box.take_for("c0c0c0c0c0c0") == [] and box.take_for("") == [] and not box.dirty
+    # Matched on the key only, full or cut to 12 characters
+    assert [m["text"] for m in box.take_for("5A5A5A5A5A5A5A5A")] == ["one", "two"]
+    assert box.dirty and len(box.messages) == 1
+    assert [m["text"] for m in box.take_for("b0b0b0b0b0b0")] == ["for bob"]
+    assert box.messages == []
+
+
+def test_format_mail():
+    m = {"from": "Alice", "text": "see you at 8", "at": HEARD_NOW - 7200}
+    assert bot.format_mail(m, now=HEARD_NOW) == "📬 Alice 2h ago: see you at 8"
+    long = {"from": "N" * 32, "text": "x" * bot.MAIL_MAX_BYTES, "at": HEARD_NOW - 86400 * 6}
+    assert len(bot.trim(bot.format_mail(long, now=HEARD_NOW)).encode("utf-8")) <= bot.MAX_REPLY_BYTES
+    assert bot.format_mail(long, now=HEARD_NOW).endswith("x" * bot.MAIL_MAX_BYTES)    # fits without cutting
+
+
+def test_mailbox_prune_save_load(tmp_path, monkeypatch):
+    path = str(tmp_path / "mail.json")
+    box = bot.Mailbox()
+    box.add("Alice", "name:alice", "Bob", "b0b0", "new", now=HEARD_NOW)
+    box.add("Alice", "name:alice", "Bob", "b0b0", "old", now=HEARD_NOW - 8 * 86400)
+    box.prune(now=HEARD_NOW)
+    assert [m["text"] for m in box.messages] == ["new"]
+    assert box.save(path) and not box.dirty
+    loaded = bot.Mailbox()
+    loaded.load(path)
+    assert loaded.messages == box.messages
+    (tmp_path / "bad.json").write_text('[{"from": "x"}, "junk"]', encoding="utf-8")
+    loaded.load(str(tmp_path / "bad.json"))
+    assert loaded.messages == []
+
+
+def _mail_setup(monkeypatch, approved=("b0b0b0b0b0b0", "5a5a5a5a5a5a")):
+    monkeypatch.setattr(bot, "_radio", type("Radio", (), {"contacts": MAIL_CONTACTS, "self_info": {}})())
+    box, users = bot.Mailbox(), bot.MailUsers()
+    users.users = [{"key": k, "name": "", "added": 0} for k in approved]
+    monkeypatch.setattr(bot, "_mailbox", box)
+    monkeypatch.setattr(bot, "_mail_users", users)
+    monkeypatch.setattr(bot, "ADMIN_PUBKEYS", set())
+    return box
+
+
+def test_mail_dm_only(monkeypatch):
+    box = _mail_setup(monkeypatch)
+    # On a channel, even from an approved contact's name: a name can be faked, a DM can't
+    assert asyncio.run(bot.run_command("!mail", "sam hi", "Bob", {}, ("chan", 1))) ==         "@[Bob] 📮 !mail only works in a DM to the bot"
+    assert asyncio.run(bot.run_command("!mail", "", "Bob", {}, ("chan", 1))) ==         "@[Bob] 📮 !mail only works in a DM to the bot"
+    assert box.messages == []
+    assert "Held for Bob" in asyncio.run(bot.run_command("!mail", "bob hi", "", {}, ("dm", "5a5a5a5a5a5a")))
+
+
+def test_mail_only_from_approved_users(monkeypatch):
+    box = _mail_setup(monkeypatch, approved=("5a5a5a5a5a5a",))
+    denied = "📮 !mail is only for approved users. Ask an admin to add you"
+    # Bob is a contact but not approved
+    assert asyncio.run(bot.run_command("!mail", "sam hi", "", {}, ("dm", "b0b0b0b0b0b0"))) == denied
+    # Not even a contact
+    assert asyncio.run(bot.run_command("!mail", "sam hi", "", {}, ("dm", "eeeeeeeeeeee"))) == denied
+    assert box.messages == []
+    # Admins can always use it
+    monkeypatch.setattr(bot, "ADMIN_PUBKEYS", {"B0B0B0B0B0B0"})
+    assert "Held for Sam" in asyncio.run(bot.run_command("!mail", "sam hi", "", {}, ("dm", "b0b0b0b0b0b0")))
+
+
+def test_mail_per_sender_cap(monkeypatch):
+    monkeypatch.setattr(bot, "MAIL_MAX_PER_SENDER", 3)
+    box = bot.Mailbox()
+    for to in ("aa0000000000", "bb0000000000", "cc0000000000"):
+        assert box.add("Alice", "a1a1a1a1a1a1", to, to, "hi").startswith("📮 Held for")
+    assert box.add("Alice", "a1a1a1a1a1a1", "Dee", "dd0000000000", "hi") ==         "📮 You have 3 messages waiting, the most allowed. Try again once some are delivered"
+    # Other senders aren't affected
+    assert box.add("Carol", "c3c3c3c3c3c3", "Dee", "dd0000000000", "hi").startswith("📮 Held for Dee (1/10)")
+    # Once some are delivered, Alice can send again
+    box.take_for("aa0000000000")
+    assert box.add("Alice", "a1a1a1a1a1a1", "Dee", "dd0000000000", "hi").startswith("📮 Held for Dee")
+
+
+def test_mail_take_for_limit():
+    box = bot.Mailbox()
+    for i in range(5):
+        box.add("Alice", f"s{i}", "Bob", "b0b0b0b0b0b0", f"m{i}", now=HEARD_NOW + i)
+    # Room for 2 in the send queue: the 2 oldest go now, the rest wait for next time
+    assert [m["text"] for m in box.take_for("b0b0b0b0b0b0", limit=2)] == ["m0", "m1"]
+    assert [m["text"] for m in box.messages] == ["m2", "m3", "m4"]
+    assert box.take_for("b0b0b0b0b0b0", limit=0) == [] and box.take_for("b0b0b0b0b0b0", limit=-3) == []
+    assert [m["text"] for m in box.take_for("b0b0b0b0b0b0")] == ["m2", "m3", "m4"]
+
+
+def test_sender_room():
+    async def check():
+        sender = bot.Sender(None)
+        assert sender.room() == 50
+        sender.dm("b0b0", "hi")
+        assert sender.room() == 49
+    asyncio.run(check())
+
+
+def test_mail_users_add_list_remove(tmp_path, monkeypatch):
+    path = str(tmp_path / "authed_mail_users.json")
+    users = bot.MailUsers()
+    assert bot.list_mail_users(MAIL_CONTACTS, users) == "📮 No mail users. Add one with !addmailuser <public key>"
+    assert bot.add_mail_user("B0B0B0B0B0B00000", MAIL_CONTACTS, users, path) == "📮 Bob can now use !mail (1 user)"
+    assert bot.add_mail_user("b0b0b0b0b0b0", MAIL_CONTACTS, users, path) == "📮 b0b0b0b0b0b0 can already use !mail"
+    assert bot.add_mail_user("1c2d3e4f5a6b", MAIL_CONTACTS, users, path) == "📮 1c2d3e4f5a6b can now use !mail (2 users)"
+    assert bot.add_mail_user("b0b0", MAIL_CONTACTS, users, path).startswith("📮 Use !addmailuser")
+    assert bot.add_mail_user("not-a-key!!!", MAIL_CONTACTS, users, path).startswith("📮 Use !addmailuser")
+    assert users.allowed("B0B0B0B0B0B0FFFF") and not users.allowed("b1b1b1b1b1b1")
+    assert bot.list_mail_users(MAIL_CONTACTS, users) == "📮 2 mail users: Bob b0b0b0b0b0b0, 1c2d3e4f5a6b"
+    # Written straight away, and read back
+    loaded = bot.MailUsers()
+    loaded.load(path)
+    assert [u["key"] for u in loaded.users] == ["b0b0b0b0b0b00000", "1c2d3e4f5a6b"]
+    assert bot.remove_mail_user("ffff", users, path) == "📮 No mail user with key ffff"
+    assert bot.remove_mail_user("b0b0", users, path) == "📮 Bob can no longer use !mail"
+    loaded.load(path)
+    assert [u["key"] for u in loaded.users] == ["1c2d3e4f5a6b"]
+    assert bot.remove_mail_user("xyz", users, path).startswith("📮 Use !removemailuser")
+
+
+def test_mail_users_ambiguous_remove_and_bad_file(tmp_path):
+    users = bot.MailUsers()
+    users.users = [{"key": "abab00000000"}, {"key": "abab11111111"}]
+    assert bot.remove_mail_user("abab", users, str(tmp_path / "u.json")) == "📮 2 mail users start abab, give more of the key"
+    (tmp_path / "bad.json").write_text('[{"key": "zz"}, {"key": 5}, "x", {"key": "abcdefabcdef"}]', encoding="utf-8")
+    users.load(str(tmp_path / "bad.json"))
+    assert [u["key"] for u in users.users] == ["abcdefabcdef"]
+
+
+def test_mail_user_save_failure_rolls_back(tmp_path):
+    users = bot.MailUsers()
+    bad = str(tmp_path / "missing_dir" / "u.json")
+    assert bot.add_mail_user("b0b0b0b0b0b0", MAIL_CONTACTS, users, bad) == "📮 Couldn't save the mail users file, see the log"
+    assert users.users == []
+
+
+def test_mail_user_commands_are_admin_only():
+    for cmd in ("!addmailuser", "!removemailuser", "!listmailuser"):
+        assert bot.parse_command(cmd + " b0b0b0b0b0b0")[0] == cmd
+        assert not bot.command_allowed(cmd, admin=False) and bot.command_allowed(cmd, admin=True)
+    assert bot.parse_command("!listmailusers")[0] == "!listmailuser"
+
+
+def test_clear_mail():
+    box = bot.Mailbox()
+    box.add("Alice", "a1a1a1a1a1a1", "Bob", "b0b0b0b0b0b0", "one")
+    box.add("Alice", "a1a1a1a1a1a1", "Bob", "b0b0b0b0b0b0", "two")
+    box.add("Alice", "a1a1a1a1a1a1", "Sam 🐬 Base", "5a5a5a5a5a5a", "three")
+    box.add("Alice", "a1a1a1a1a1a1", "Bobby Two", "b1b1b1b1b1b1", "four")
+    box.add("Carol", "c3c3c3c3c3c3", "Bob", "b0b0b0b0b0b0", "carol's")
+    box.dirty = False
+    assert bot.clear_mail("zed", "a1a1a1a1a1a1", box) == \
+        "📮 No messages waiting for 'zed'. Waiting: Bob 2, Sam 🐬 Base 1, Bobby Two 1"
+    assert bot.clear_mail("bo", "a1a1a1a1a1a1", box) == "📮 2 match 'bo': Bob, Bobby Two. Give more of the name"
+    assert not box.dirty
+    # Only Alice's own messages to Bob go, not Carol's
+    assert bot.clear_mail("bob", "a1a1a1a1a1a1", box) == "📮 Cleared 2 messages to Bob"
+    assert [m["text"] for m in box.messages] == ["three", "four", "carol's"] and box.dirty
+    assert bot.clear_mail("sam base", "a1a1a1a1a1a1", box) == "📮 Cleared 1 message to Sam 🐬 Base"   # emoji optional
+    assert bot.clear_mail("b1b1", "a1a1a1a1a1a1", box) == "📮 Cleared 1 message to Bobby Two"        # start of key
+    assert bot.clear_mail("", "a1a1a1a1a1a1", box) == "📮 You have no messages waiting"
+    assert bot.clear_mail("", "c3c3c3c3c3c3", box) == "📮 Cleared 1 waiting message"
+    assert box.messages == []
+
+
+def test_clear_mail_command(monkeypatch):
+    box = _mail_setup(monkeypatch, approved=())
+    box.add("Bob", "b0b0b0b0b0b0", "Sam", "5a5a5a5a5a5a", "hi")
+    assert bot.parse_command("!clearmail sam") == ("!clearmail", "sam")
+    assert bot.parse_command("!mailclear")[0] == "!clearmail"
+    assert asyncio.run(bot.run_command("!clearmail", "", "Bob", {}, ("chan", 1))) == \
+        "@[Bob] 📮 !clearmail only works in a DM to the bot"
+    # Works from the sender's own key, even though Bob isn't an approved mail user
+    assert asyncio.run(bot.run_command("!clearmail", "", "", {}, ("dm", "b0b0b0b0b0b0"))) == \
+        "📮 Cleared 1 waiting message"
+    assert box.messages == []
+
+
+def test_mail_command(monkeypatch):
+    box = _mail_setup(monkeypatch)
+    # The sender is known by the key of the DM, and named from contacts
+    assert asyncio.run(bot.run_command("!mail", "sam hi", "", {}, ("dm", "b0b0b0b0b0b0"))) ==         "📮 Held for Sam 🐬 Base (1/10), sent by DM when the bot next hears them"
+    assert (box.messages[0]["from"], box.messages[0]["from_id"]) == ("Bob", "b0b0b0b0b0b0")
 
 
 def test_save_is_admin_only():
@@ -717,10 +960,10 @@ def test_save_is_admin_only():
 def test_who_and_status_commands(monkeypatch):
     monkeypatch.setattr(bot, "_radio", type("Radio", (), {"contacts": {}, "self_info": {}})())
     h = bot.Heard()
-    h.record("Alice", "ch1", {"path_len": 1})
+    h.record("Alice", "advert", "a1a1", {"path_len": 1})
     monkeypatch.setattr(bot, "_heard", h)
     assert asyncio.run(bot.run_command("!who", "", "Bob", {})) == "@[Bob] 👥 1 heard in 24h: Alice 0s"
-    assert asyncio.run(bot.run_command("!status", "alice", "Bob", {})) == "@[Bob] 👤 Alice: heard 0s ago on ch1, 1 hop"
+    assert asyncio.run(bot.run_command("!status", "alice", "Bob", {})) ==         "@[Bob] 👤 Alice: heard 0s ago by advert, 1 hop"
 
 
 # ---------- !freq ----------
@@ -789,7 +1032,7 @@ def test_help_topics(monkeypatch):
     for cmd in ("!conv", "!ohm", "!res"):
         assert cmd in bot.help_text("conv")
     assert "!hf" in bot.help_text("radio")
-    for cmd in ("!who", "!status", "!bearing", "!freq"):
+    for cmd in ("!who", "!status", "!bearing", "!freq", "!mail"):
         assert cmd in bot.help_text("net")
     # !helpwx and !help wx give the same reply, an unknown topic gives the topic list
     assert asyncio.run(bot.run_command("!helpwx", "", "Alice", {})) == bot.help_text("wx")

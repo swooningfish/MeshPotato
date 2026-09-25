@@ -67,7 +67,8 @@
 # rate_limit_notify = true
 # min_tx_gap_sec = 3.0
 # admin_pubkeys = ["a1b2c3d4e5f6"]  # 12-hex-character key prefixes, DMs only.
-#                                   # Skip the limits and can use !stats, !uptime, !mute, !say, !save
+#                                   # Skip the limits and can use !stats, !uptime, !mute, !say, !save,
+#                                   # !addmailuser, !removemailuser and !listmailuser
 # mute_max_minutes = 1440           # longest !mute
 
 # ---------- Fun commands ----------
@@ -78,6 +79,19 @@
 # who_hours = 24                    # !who looks back this far unless given hours
 # heard_keep_days = 7               # forget a node not heard for this long
 # heard_file = "heard.json"         # saved heard list, next to run_bot.py unless a full path
+
+# ---------- Mailbox: !mail <name> <message> ----------
+# Held in memory, sent by DM the next time the bot hears the recipient's key (an advert or a DM).
+# mail.json is only read at startup and written on stop or by an admin !save.
+# !mail only works in a DM to the bot, from keys an admin has added with !addmailuser.
+# mail_max_per_pair = 10            # most waiting from one sender to one recipient
+# mail_max_per_sender = 30          # most waiting from one sender to everyone
+# mail_max_total = 200              # most waiting in all
+# mail_keep_days = 7                # drop a message not delivered in this many days
+# mail_max_bytes = 100              # longest message
+# mail_file = "mail.json"           # next to run_bot.py unless a full path
+# mail_users_file = "authed_mail_users.json"   # keys allowed to use !mail. Admins add them by DM with
+#                                   # !addmailuser <public key>. Written straight away on each change
 
 # ---------- Frequencies: !freq <topic> ----------
 # Adds topics to the built-in pmr, cb, ham, hf, marine and air, or replaces one with

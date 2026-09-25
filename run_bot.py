@@ -26,7 +26,10 @@ Commands (channel or direct message):
   !mute <minutes>    -> Stop replies and scheduled messages for a while (admin DMs only)
   !unmute            -> End a mute early (admin DMs only)
   !say <ch> <text>   -> Post text to a channel as the bot (admin DMs only)
-  !save              -> Write the !who / !status heard list to disk now (admin DMs only)
+  !save              -> Write the heard list and the !mail box to disk now (admin DMs only)
+  !addmailuser <key> -> Let a public key use !mail (admin DMs only)
+  !removemailuser <key> -> Stop a key using !mail (admin DMs only)
+  !listmailuser      -> List the keys allowed to use !mail (admin DMs only)
   !help              -> Help topics: !helptest, !helpwx, !helpradio, !helpfun, !helpconv (the ! is required)
   !roll [NdS+M]      -> Roll dice: !roll, !roll d20, !roll 2d6+3
   !flipacoin         -> Heads or tails
@@ -34,10 +37,12 @@ Commands (channel or direct message):
   !conv <n> <unit> [unit] -> Unit conversion: !conv 10 mi km, !conv 20 c, !conv 868 mhz
   !ohm <two of V/A/Ω/W>   -> Ohm's law and power: !ohm 12v 2a, !ohm 5v 220r, !ohm 10w 50ohm
   !res <colours|value>    -> Resistor colour code both ways: !res yellow violet red gold, !res 4k7
-  !who [hours|rpt]        -> People (or repeaters) heard lately, most recent first
+  !who [hours|rpt]        -> People (or repeaters) heard by advert or DM lately, most recent first
   !status <name>          -> When the bot last heard someone, how, and where they are
   !bearing <name|place>   -> Distance and compass direction from you (or the bot) to a contact or place
   !freq [topic]           -> Frequency lists: pmr, cb, ham, hf, marine, air, and mesh (the bot's radio)
+  !mail <name> <message>  -> (DM only) Hold a message for someone, sent by DM when the bot next hears them
+  !clearmail [name]       -> (DM only) Cancel your own waiting messages, to everyone or to one person
 
 [location] accepts:
   - a name from LOCATIONS below        (!wx home)
@@ -166,6 +171,18 @@ EIGHTBALL_ANSWERS = [
 WHO_HOURS = 24                  # !who lists people heard in this many hours
 HEARD_KEEP_DAYS = 7             # forget a node not heard for this long
 HEARD_FILE = "heard.json"       # who was heard when, kept over restarts. Relative = next to run_bot.py
+
+# ---------- Mailbox: !mail <name> <message> ----------
+# Held in memory and passed on by DM the next time the bot hears the recipient's key (advert or DM).
+MAIL_MAX_PER_PAIR = 10          # most messages waiting from one sender to one recipient
+MAIL_MAX_PER_SENDER = 30        # most messages waiting from one sender to everyone
+MAIL_MAX_TOTAL = 200            # most messages waiting in all
+MAIL_KEEP_DAYS = 7              # drop a message not delivered in this many days
+MAIL_MAX_BYTES = 100            # longest message, so it fits in one DM with the sender and age
+MAIL_FILE = "mail.json"         # saved on stop and by !save. Relative = next to run_bot.py
+MAIL_USERS_FILE = "authed_mail_users.json"      # keys allowed to use !mail, set with !addmailuser.
+                                                # Written when an admin changes it. Relative = next to run_bot.py
+MAIL_TX_RESERVE = 5             # send-queue slots kept free for replies when passing on mail
 
 # ---------- Frequencies: !freq <topic> ----------
 # config.toml [freq_lists] adds topics or replaces these. An empty string removes one.
@@ -310,6 +327,13 @@ _CONFIG_SETTINGS: dict[str, Optional[Callable[[Any], Any]]] = {
     "WHO_HOURS": float,
     "HEARD_KEEP_DAYS": float,
     "HEARD_FILE": None,
+    "MAIL_MAX_PER_PAIR": None,
+    "MAIL_MAX_PER_SENDER": None,
+    "MAIL_MAX_TOTAL": None,
+    "MAIL_KEEP_DAYS": float,
+    "MAIL_MAX_BYTES": None,
+    "MAIL_FILE": None,
+    "MAIL_USERS_FILE": None,
     "FREQ_LISTS": lambda d: {k: t for k, t in {**FREQ_LISTS, **{str(k).lower(): str(v) for k, v in d.items()}}.items()
                              if t},
     "SCHEDULED_MESSAGES": lambda v: [dict(e) for e in v],
@@ -639,9 +663,9 @@ def find_contacts(contacts: dict, query: str) -> list[dict]:
     return _match_names(list(contacts.values()), query, _contact_name)
 
 
-def _names_list(names: list[str], limit: int = 4) -> str:
+def _names_list(names: list[str], limit: int = 4, cut: Optional[int] = PATH_NAME_CHARS) -> str:
     """'Alice, Alan, Alfie +2 more'."""
-    shown = ", ".join(n[:PATH_NAME_CHARS].strip() for n in names[:limit])
+    shown = ", ".join(n[:cut].strip() for n in names[:limit])
     return shown + (f" +{len(names) - limit} more" if len(names) > limit else "")
 
 
@@ -689,29 +713,27 @@ def heard_id(name: str) -> str:
     return plain or " ".join(name.split()).lower()
 
 
+KEY_QUERY_RE = re.compile(r"^[0-9a-f]{4,64}$")
+
+
 class Heard:
-    """Nodes the bot has heard, by a message on a listened channel, a DM or an advert.
-    Keyed by heard_id(name). A node that changes its name but keeps its key replaces its
-    old entry. Loaded from HEARD_FILE at startup and saved to it on exit or by !save."""
+    """Nodes the bot has heard, keyed by public key: adverts, which are signed, and DMs,
+    which are encrypted to the key. So nobody can fake being heard, and a rename updates
+    the same entry. Channel messages aren't recorded: they only carry a name, which
+    anyone can set. Loaded from HEARD_FILE at startup and saved to it on exit or by !save."""
 
     def __init__(self):
         self.nodes: dict[str, dict[str, Any]] = {}
         self.dirty = False
 
-    def record(self, name: str, via: str, info: Optional[dict[str, Any]] = None, key: str = "",
+    def record(self, name: str, via: str, key: str, info: Optional[dict[str, Any]] = None,
                repeater: bool = False, now: Optional[float] = None) -> None:
-        """via is 'ch1', 'dm' or 'advert'. info is the message's rx info (hops, SNR)."""
+        """via is 'dm' or 'advert'. info is the rx info (hops, SNR). Needs a name and a key."""
         name = " ".join((name or "").split())
-        if not name:
+        key = (key or "").lower()[:HEARD_KEY_CHARS]
+        if not name or not key:
             return
-        node_id = heard_id(name)
-        entry: dict[str, Any] = {"name": name, "at": time.time() if now is None else now, "via": via}
-        key = (key or self.nodes.get(node_id, {}).get("key", "")).lower()[:HEARD_KEY_CHARS]
-        if key:
-            entry["key"] = key
-            # Same key under another name: the node was renamed, so drop the old name
-            for other in [k for k, e in self.nodes.items() if k != node_id and e.get("key") == key]:
-                del self.nodes[other]
+        entry: dict[str, Any] = {"name": name, "at": time.time() if now is None else now, "via": via, "key": key}
         if repeater:
             entry["repeater"] = True
         info = info or {}
@@ -720,22 +742,17 @@ class Heard:
         for field in ("path_len", "snr"):
             if info.get(field) is not None:
                 entry[field] = info[field]
-        self.nodes[node_id] = entry
+        self.nodes[key] = entry
         self.dirty = True
 
-    def _merge(self, entry: dict[str, Any]) -> None:
-        """Add a saved entry, keeping the newest when two are the same node."""
-        node_id = heard_id(entry["name"])
-        key = entry.get("key")
-        same = [k for k, e in self.nodes.items() if k == node_id or (key and e.get("key") == key)]
-        if any(self.nodes[k]["at"] >= entry["at"] for k in same):
-            return
-        for k in same:
-            del self.nodes[k]
-        self.nodes[node_id] = entry
-
     def find(self, query: str) -> list[dict[str, Any]]:
-        return _match_names(list(self.nodes.values()), query, lambda e: e["name"])
+        """Nodes whose name matches, else whose key starts with the query ('!status b0b0')."""
+        nodes = list(self.nodes.values())
+        found = _match_names(nodes, query, lambda e: e["name"])
+        q = query.strip().lower()
+        if not found and KEY_QUERY_RE.match(q):
+            found = [e for e in nodes if e["key"].startswith(q) or q.startswith(e["key"])]
+        return found
 
     def recent(self, hours: float, now: Optional[float] = None, repeaters: bool = False) -> list[dict[str, Any]]:
         """People (or repeaters) heard in the last `hours`, most recent first."""
@@ -751,32 +768,51 @@ class Heard:
         self.dirty = self.dirty or bool(old)
 
     def load(self, path: str) -> None:
-        try:
-            with open(path, encoding="utf-8") as fh:
-                data = json.load(fh)
-            self.nodes = {}
-            for e in data:
-                if e.get("name") and isinstance(e.get("at"), (int, float)):
-                    self._merge(e)
-        except FileNotFoundError:
-            return
-        except (OSError, ValueError, TypeError, AttributeError) as ex:
-            _LOGGER.warning("Can't read %s, starting with no one heard: %s", path, ex)
+        """Entries without a key (channel names, from older versions) are dropped, and the
+        file is rewritten without them on the next save."""
+        self.nodes = {}
+        saved = _load_json_list(path)
+        for e in saved:
+            if (isinstance(e, dict) and isinstance(e.get("name"), str) and e["name"]
+                    and isinstance(e.get("key"), str) and KEY_QUERY_RE.match(e["key"])
+                    and isinstance(e.get("at"), (int, float))):
+                old = self.nodes.get(e["key"])
+                if old is None or old["at"] < e["at"]:
+                    self.nodes[e["key"]] = e
+        self.dirty = len(self.nodes) != len(saved)
 
     def save(self, path: str) -> bool:
         """Write the list if it changed since the last save. False when the write failed."""
         if not self.dirty:
             return True
-        tmp = path + ".tmp"
-        try:
-            with open(tmp, "w", encoding="utf-8") as fh:
-                json.dump(list(self.nodes.values()), fh)
-            os.replace(tmp, path)
-            self.dirty = False
-            return True
-        except OSError as ex:
-            _LOGGER.warning("Can't save %s: %s", path, ex)
-            return False
+        self.dirty = not _save_json_list(path, list(self.nodes.values()))
+        return not self.dirty
+
+
+def _load_json_list(path: str) -> list:
+    """The list saved in `path`, or [] when there is no file or it can't be read."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+        return data if isinstance(data, list) else []
+    except FileNotFoundError:
+        return []
+    except (OSError, ValueError) as ex:
+        _LOGGER.warning("Can't read %s, starting empty: %s", path, ex)
+        return []
+
+
+def _save_json_list(path: str, items: list) -> bool:
+    """Write via a temp file so a crash mid-write can't leave half a file. False on failure."""
+    tmp = path + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(items, fh)
+        os.replace(tmp, path)
+        return True
+    except OSError as ex:
+        _LOGGER.warning("Can't save %s: %s", path, ex)
+        return False
 
 
 _heard = Heard()
@@ -786,18 +822,27 @@ def heard_path() -> str:
     return HEARD_FILE if os.path.isabs(HEARD_FILE) else os.path.join(SCRIPT_DIR, HEARD_FILE)
 
 
-def save_heard(heard: Optional[Heard] = None, path: Optional[str] = None) -> str:
-    """!save (admin): write the heard list now, before a power cut, rather than waiting for the bot to stop."""
+def _plural(n: int, word: str) -> str:
+    return f"{n} {word}{'' if n == 1 else 's'}"
+
+
+def _save_part(store: Any, path: str, what: str) -> str:
+    """'12 nodes saved', '3 messages unchanged' or 'heard.json failed'."""
+    if not store.dirty:
+        return f"{what} unchanged"
+    return f"{what} saved" if store.save(path) else f"{os.path.basename(path)} failed"
+
+
+def save_state(heard: Optional[Heard] = None, mailbox: Optional["Mailbox"] = None,
+               heard_file: Optional[str] = None, mail_file: Optional[str] = None) -> str:
+    """!save (admin): write the heard list and the mailbox now, before a power cut,
+    rather than waiting for the bot to stop. '💾 12 nodes saved, 3 messages unchanged'."""
     heard = _heard if heard is None else heard
-    path = heard_path() if path is None else path
-    icon = "💾 " if USE_EMOJI else ""
-    n = len(heard.nodes)
-    nodes = f"{n} node{'' if n == 1 else 's'}"
-    if not heard.dirty:
-        return f"{icon}Nothing new to save, {nodes} already in {os.path.basename(path)}"
-    if not heard.save(path):
-        return f"{icon}Save failed, see the log"
-    return f"{icon}Saved {nodes} to {os.path.basename(path)}"
+    mailbox = _mailbox if mailbox is None else mailbox
+    parts = [_save_part(heard, heard_file or heard_path(), _plural(len(heard.nodes), "node")),
+             _save_part(mailbox, mail_file or mail_path(), _plural(len(mailbox.messages), "message"))]
+    text = ("💾 " if USE_EMOJI else "") + ", ".join(parts)
+    return text + (", see the log" if "failed" in text else "")
 
 
 def _ago(seconds: float) -> str:
@@ -813,15 +858,12 @@ def _ago(seconds: float) -> str:
 
 
 def _via_text(via: str) -> str:
-    if via == "dm":
-        return "by DM"
-    if via == "advert":
-        return "by advert"
-    return f"on {via}"
+    return "by DM" if via == "dm" else "by advert"
 
 
 def format_who(heard: Heard, arg: str = "", now: Optional[float] = None, budget: Optional[int] = None) -> str:
-    """!who: '👥 4 heard in 24h: Alice 2m, Bob 15m, Carol 3h +1 more'.
+    """!who: '👥 4 heard in 24h: Alice 2m, Bob 15m, Carol 3h +1 more'. Only nodes heard by
+    advert or DM, so every time is proven by the node's key.
     '!who 2' looks back 2 hours, '!who rpt' lists repeaters instead of people."""
     budget = MAX_REPLY_BYTES if budget is None else budget
     now = time.time() if now is None else now
@@ -834,52 +876,63 @@ def format_who(heard: Heard, arg: str = "", now: Optional[float] = None, budget:
             hours = min(max(float(w.rstrip("h")), 0.1), HEARD_KEEP_DAYS * 24)
         except ValueError:
             pass
-    what = "repeaters" if repeaters else "people"
     found = heard.recent(hours, now, repeaters=repeaters)
     if not found:
-        return f"{icon}No {what} heard in the last {hours:g}h"
+        return f"{icon}No {'repeaters' if repeaters else 'people'} heard in the last {hours:g}h"
     kind = ("repeater " if len(found) == 1 else "repeaters ") if repeaters else ""
     head = f"{icon}{len(found)} {kind}heard in {hours:g}h: "
     # Full names when they fit, else names cut to PATH_NAME_CHARS, else fewer names
     for n in range(len(found), 0, -1):
         more = f" +{len(found) - n} more" if n < len(found) else ""
         for cut in (None, PATH_NAME_CHARS):
-            items = [f"{e['name'][:cut].strip()} {_ago(now - e['at'])}" for e in found[:n]]
-            text = head + ", ".join(items) + more
+            text = head + ", ".join(f"{e['name'][:cut].strip()} {_ago(now - e['at'])}" for e in found[:n]) + more
             if len(text.encode("utf-8")) <= budget:
                 return text
     return head + f"+{len(found)} more"
 
 
+def _heard_parts(e: dict[str, Any], now: float) -> list[str]:
+    """'heard 12m ago on ch1', '2 hops', 'SNR 7.5dB'."""
+    parts = [f"heard {_ago(now - e['at'])} ago {_via_text(e['via'])}"]
+    if e.get("direct"):
+        parts.append("direct route")
+    elif e.get("path_len") is not None:
+        parts.append(_hops(e["path_len"]))
+    if e.get("snr") is not None:
+        parts.append(f"SNR {e['snr']:g}dB")
+    return parts
+
+
+def _person_label(e: dict[str, Any]) -> str:
+    """'Bob b0b0', so two nodes with one name can be told apart."""
+    return f"{e['name'][:PATH_NAME_CHARS].strip()} {e['key'][:4]}"
+
+
 def format_status(query: str, heard: Heard, contacts: dict, bot_pos: Optional[tuple[float, float]],
                   now: Optional[float] = None) -> str:
-    """!status: '👤 Alice: heard 12m ago on ch1, 2 hops, SNR 7.5dB | 📍 4.2km NE of bot'.
-    Falls back to the contact's last advert when the bot hasn't heard them itself."""
+    """!status: '👤 Bob: heard 3h ago by advert | 📍 4.2km NE of bot'. Falls back to the
+    contact's last advert when the bot hasn't heard them itself. The query can be a
+    name or the start of a public key."""
     now = time.time() if now is None else now
     icon, pin = ("👤 ", "📍 ") if USE_EMOJI else ("", "")
     q = query.strip()
     if not q:
-        return icon + "Use !status <name>, e.g. !status Alice. !who lists who's been heard"
+        return icon + "Use !status <name or key>, e.g. !status Alice. !who lists who's been heard"
     matches = heard.find(q)
     if len(matches) > 1:
-        return f"{icon}{len(matches)} match '{q}': {_names_list([e['name'] for e in matches])}"
+        return f"{icon}{len(matches)} match '{q}': {_names_list([_person_label(r) for r in matches], cut=None)}"
     contact = None
+    sections = []
     if matches:
         e = matches[0]
         name = e["name"]
-        parts = [f"heard {_ago(now - e['at'])} ago {_via_text(e['via'])}"]
-        if e.get("direct"):
-            parts.append("direct route")
-        elif e.get("path_len") is not None:
-            parts.append(_hops(e["path_len"]))
-        if e.get("snr") is not None:
-            parts.append(f"SNR {e['snr']:g}dB")
-        by_key = [c for c in contacts.values()
-                  if e.get("key") and (c.get("public_key") or "").lower().startswith(e["key"])]
-        by_name = [c for c in contacts.values() if _contact_name(c).lower() == name.lower()]
-        contact = (by_key or by_name or [None])[0]
+        sections.append(", ".join(_heard_parts(e, now)))
+        contact = next((c for c in contacts.values()
+                        if (c.get("public_key") or "").lower().startswith(e["key"])), None)
     else:
         found = find_contacts(contacts, q)
+        if not found and KEY_QUERY_RE.match(q.lower()):
+            found = [c for c in contacts.values() if (c.get("public_key") or "").lower().startswith(q.lower())]
         if len(found) > 1:
             return f"{icon}{len(found)} contacts match '{q}': {_names_list([_contact_name(c) for c in found])}"
         if not found:
@@ -888,14 +941,280 @@ def format_status(query: str, heard: Heard, contacts: dict, bot_pos: Optional[tu
         name = _contact_name(contact)
         advert = contact.get("last_advert") or 0
         # last_advert is the node's own clock, so ignore one that is far in the future
-        parts = [f"last advert {_ago(now - advert)} ago" if 0 < advert <= now + 3600 else "in contacts, not heard yet"]
-    text = f"{icon}{name}: " + ", ".join(parts)
+        sections.append(f"last advert {_ago(now - advert)} ago" if 0 < advert <= now + 3600
+                        else "in contacts, not heard yet")
     pos = _gps(contact)
     if pos and bot_pos:
         km = haversine_km(bot_pos, pos)
         where = f"{_distance(km)} {_compass(initial_bearing(bot_pos, pos))} of bot" if km >= 0.05 else "at the bot"
-        text += f" | {pin}{where}"
-    return text
+        sections.append(pin + where)
+    return f"{icon}{name}: " + " | ".join(sections)
+
+
+# ---------- !mail: messages held for people out of range ----------
+class Mailbox:
+    """Messages waiting for someone the bot can't reach right now. Each is sent by DM the
+    next time the bot hears the recipient, then dropped. Kept in memory, loaded from
+    MAIL_FILE at startup and saved to it on exit or by !save."""
+
+    def __init__(self):
+        self.messages: list[dict[str, Any]] = []
+        self.dirty = False
+
+    def add(self, from_name: str, from_id: str, to_name: str, to_key: str, text: str,
+            now: Optional[float] = None) -> str:
+        """Queue a message. Returns the reply for the sender."""
+        icon = "📮 " if USE_EMOJI else ""
+        to_key = to_key.lower()[:HEARD_KEY_CHARS]
+        mine = [m for m in self.messages if m["from_id"] == from_id]
+        pair = [m for m in mine if m["to_key"] == to_key]
+        if len(pair) >= MAIL_MAX_PER_PAIR:
+            return f"{icon}{to_name} already has {MAIL_MAX_PER_PAIR} from you waiting, the most allowed"
+        if len(mine) >= MAIL_MAX_PER_SENDER:
+            return f"{icon}You have {MAIL_MAX_PER_SENDER} messages waiting, the most allowed. Try again once some are delivered"
+        if len(self.messages) >= MAIL_MAX_TOTAL:
+            return f"{icon}The mailbox is full, try again later"
+        self.messages.append({"from": from_name, "from_id": from_id, "to": to_name,
+                              "to_key": to_key, "text": text,
+                              "at": time.time() if now is None else now})
+        self.dirty = True
+        return f"{icon}Held for {to_name} ({len(pair) + 1}/{MAIL_MAX_PER_PAIR}), sent by DM when the bot next hears them"
+
+    def take_for(self, key: str, limit: Optional[int] = None) -> list[dict[str, Any]]:
+        """Remove and return up to `limit` messages for a public key the bot just heard,
+        oldest first. The rest stay for the next time it is heard. Only a key counts,
+        never a name: anyone can take a name, but not a key."""
+        key = (key or "").lower()[:HEARD_KEY_CHARS]
+        if not key or (limit is not None and limit <= 0):
+            return []
+        mine = [m for m in self.messages if m["to_key"] == key][:limit]
+        if mine:
+            taken = {id(m) for m in mine}
+            self.messages = [m for m in self.messages if id(m) not in taken]
+            self.dirty = True
+        return mine
+
+    def waiting_from(self, from_id: str) -> Counter:
+        """Recipient name -> messages from this sender still waiting."""
+        return Counter(m["to"] for m in self.messages if m["from_id"] == from_id)
+
+    def clear_from(self, from_id: str, to_keys: Optional[set[str]] = None) -> int:
+        """Remove this sender's waiting messages, to everyone or only to `to_keys`. Returns how many."""
+        def theirs(m):
+            return m["from_id"] == from_id and (to_keys is None or m["to_key"] in to_keys)
+        n = sum(1 for m in self.messages if theirs(m))
+        if n:
+            self.messages = [m for m in self.messages if not theirs(m)]
+            self.dirty = True
+        return n
+
+    def prune(self, now: Optional[float] = None) -> None:
+        cutoff = (time.time() if now is None else now) - MAIL_KEEP_DAYS * 86400
+        kept = [m for m in self.messages if m["at"] >= cutoff]
+        if len(kept) != len(self.messages):
+            _LOGGER.info("Dropped %d undelivered messages older than %g days",
+                         len(self.messages) - len(kept), MAIL_KEEP_DAYS)
+            self.messages, self.dirty = kept, True
+
+    def load(self, path: str) -> None:
+        fields = ("from", "from_id", "to", "to_key", "text")
+        self.messages = [m for m in _load_json_list(path)
+                         if isinstance(m, dict) and all(isinstance(m.get(f), str) for f in fields)
+                         and isinstance(m.get("at"), (int, float))]
+
+    def save(self, path: str) -> bool:
+        if not self.dirty:
+            return True
+        self.dirty = not _save_json_list(path, self.messages)
+        return not self.dirty
+
+
+_mailbox = Mailbox()
+
+
+class MailUsers:
+    """Public keys allowed to leave !mail, kept in MAIL_USERS_FILE. Admins add and remove
+    them by DM. Loaded at startup and written straight away on each change, which is rare."""
+
+    def __init__(self):
+        self.users: list[dict[str, Any]] = []      # {"key": full or prefix hex, "name": at add time, "added": time}
+
+    def allowed(self, key: str) -> bool:
+        key = (key or "").lower()[:HEARD_KEY_CHARS]
+        return bool(key) and any(u["key"][:HEARD_KEY_CHARS] == key for u in self.users)
+
+    def find(self, query: str) -> list[dict[str, Any]]:
+        q = query.strip().lower()
+        return [u for u in self.users if u["key"].startswith(q) or q.startswith(u["key"])] if q else []
+
+    def load(self, path: str) -> None:
+        self.users = [u for u in _load_json_list(path)
+                      if isinstance(u, dict) and isinstance(u.get("key"), str)
+                      and re.fullmatch(r"[0-9a-f]{12,64}", u["key"])]
+
+    def save(self, path: str) -> bool:
+        return _save_json_list(path, self.users)
+
+
+_mail_users = MailUsers()
+
+
+def mail_users_path() -> str:
+    return MAIL_USERS_FILE if os.path.isabs(MAIL_USERS_FILE) else os.path.join(SCRIPT_DIR, MAIL_USERS_FILE)
+
+
+MAIL_USER_KEY_RE = re.compile(r"^[0-9a-f]{12,64}$")
+
+
+def add_mail_user(arg: str, contacts: dict, users: Optional[MailUsers] = None, path: Optional[str] = None) -> str:
+    """!addmailuser <pubkey> (admin): let this key use !mail. Needs at least 12 hex characters."""
+    users = _mail_users if users is None else users
+    icon = "📮 " if USE_EMOJI else ""
+    key = arg.strip().lower()
+    if not MAIL_USER_KEY_RE.match(key):
+        return icon + "Use !addmailuser <public key>, at least the first 12 hex characters"
+    if users.allowed(key):
+        return f"{icon}{key[:HEARD_KEY_CHARS]} can already use !mail"
+    contact = [c for c in contacts.values() if (c.get("public_key") or "").lower().startswith(key[:HEARD_KEY_CHARS])]
+    name = _contact_name(contact[0]) if len(contact) == 1 else ""
+    users.users.append({"key": key, "name": name, "added": time.time()})
+    if not users.save(mail_users_path() if path is None else path):
+        users.users.pop()
+        return f"{icon}Couldn't save the mail users file, see the log"
+    return f"{icon}{name or key[:HEARD_KEY_CHARS]} can now use !mail ({_plural(len(users.users), 'user')})"
+
+
+def remove_mail_user(arg: str, users: Optional[MailUsers] = None, path: Optional[str] = None) -> str:
+    """!removemailuser <pubkey> (admin): the start of the key is enough if only one user matches."""
+    users = _mail_users if users is None else users
+    icon = "📮 " if USE_EMOJI else ""
+    key = arg.strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{4,64}", key):
+        return icon + "Use !removemailuser <public key>, or its start. !listmailuser shows them"
+    found = users.find(key)
+    if not found:
+        return f"{icon}No mail user with key {key}"
+    if len(found) > 1:
+        return f"{icon}{len(found)} mail users start {key}, give more of the key"
+    old = list(users.users)
+    users.users.remove(found[0])
+    if not users.save(mail_users_path() if path is None else path):
+        users.users = old
+        return f"{icon}Couldn't save the mail users file, see the log"
+    return f"{icon}{found[0].get('name') or found[0]['key'][:HEARD_KEY_CHARS]} can no longer use !mail"
+
+
+def list_mail_users(contacts: dict, users: Optional[MailUsers] = None, budget: Optional[int] = None) -> str:
+    """!listmailuser (admin): '📮 3 mail users: Bob b0b0b0b0b0b0, Sam 5a5a5a5a5a5a, 1c2d3e4f5a6b'.
+    Names come from the contacts now, else the name when they were added."""
+    users = _mail_users if users is None else users
+    budget = MAX_REPLY_BYTES if budget is None else budget
+    icon = "📮 " if USE_EMOJI else ""
+    if not users.users:
+        return icon + "No mail users. Add one with !addmailuser <public key>"
+    items = []
+    for u in users.users:
+        contact = [c for c in contacts.values() if (c.get("public_key") or "").lower().startswith(u["key"][:HEARD_KEY_CHARS])]
+        name = (_contact_name(contact[0]) if len(contact) == 1 else "") or u.get("name", "")
+        short = u["key"][:HEARD_KEY_CHARS]
+        items.append(f"{name[:PATH_NAME_CHARS].strip()} {short}" if name else short)
+    head = f"{icon}{_plural(len(items), 'mail user')}: "
+    for n in range(len(items), 0, -1):
+        text = head + ", ".join(items[:n]) + (f" +{len(items) - n} more" if n < len(items) else "")
+        if len(text.encode("utf-8")) <= budget:
+            return text
+    return head + f"+{len(items)} more"
+
+
+def mail_path() -> str:
+    return MAIL_FILE if os.path.isabs(MAIL_FILE) else os.path.join(SCRIPT_DIR, MAIL_FILE)
+
+
+def format_mail(m: dict[str, Any], now: Optional[float] = None) -> str:
+    """The DM a recipient gets: '📬 Alice 2h ago: see you at the hall'."""
+    now = time.time() if now is None else now
+    icon = "📬 " if USE_EMOJI else "Mail from "
+    return f"{icon}{m['from'][:PATH_NAME_CHARS].strip()} {_ago(now - m['at'])} ago: {m['text']}"
+
+
+MAIL_MENTION_RE = re.compile(r"^@\[([^\]]+)\]\s*(.*)$", re.S)
+
+
+def mail_recipient(arg: str, contacts: dict) -> tuple[Optional[dict], str, str]:
+    """Split '!mail' text into (contact, message, error). The name can be an @[mention],
+    a whole contact name (spaces and emoji optional: 'sam base hello'), or the start
+    of one name ('sa hello'). Only companions can receive, not repeaters."""
+    people = [c for c in contacts.values() if c.get("type") == CHAT_NODE_TYPE and _contact_name(c)]
+    m = MAIL_MENTION_RE.match(arg.strip())
+    if m:
+        wanted = heard_id(m.group(1))
+        found = [c for c in people if heard_id(_contact_name(c)) == wanted]
+        if not found:
+            return None, "", f"No contact called '{m.group(1)}'"
+        return found[0], m.group(2).strip(), ""
+    words = arg.split()
+    # Longest run of leading words that is a whole contact name
+    for n in range(len(words) - 1, 0, -1):
+        wanted = heard_id(" ".join(words[:n]))
+        found = [c for c in people if heard_id(_contact_name(c)) == wanted]
+        if len(found) == 1:
+            return found[0], " ".join(words[n:]), ""
+    if len(words) < 2:
+        return None, "", ""
+    found = [c for c in people if heard_id(_contact_name(c)).startswith(heard_id(words[0]))]
+    if len(found) > 1:
+        return None, "", f"{len(found)} contacts match '{words[0]}': {_names_list([_contact_name(c) for c in found])}"
+    if not found:
+        return None, "", f"No contact called '{words[0]}'"
+    return found[0], " ".join(words[1:]), ""
+
+
+def clear_mail(arg: str, from_id: str, mailbox: Optional[Mailbox] = None) -> str:
+    """!clearmail [name]: cancel your own messages that haven't been delivered yet, to
+    everyone or to one recipient. The name is matched against the people you have
+    mail waiting for (emoji optional), or the start of their key."""
+    mailbox = _mailbox if mailbox is None else mailbox
+    icon = "📮 " if USE_EMOJI else ""
+    mine = [m for m in mailbox.messages if m["from_id"] == from_id]
+    if not mine:
+        return icon + "You have no messages waiting"
+    q = arg.strip()
+    if not q:
+        n = mailbox.clear_from(from_id)
+        return f"{icon}Cleared {_plural(n, 'waiting message')}"
+    recipients = {m["to_key"]: m["to"] for m in mine}
+    rows = [{"key": k, "name": n} for k, n in recipients.items()]
+    found = _match_names(rows, q, lambda r: heard_id(r["name"])) or         _match_names(rows, heard_id(q), lambda r: heard_id(r["name"]))
+    if not found and KEY_QUERY_RE.match(q.lower()):
+        found = [r for r in rows if r["key"].startswith(q.lower()[:HEARD_KEY_CHARS])]
+    if not found:
+        waiting = ", ".join(f"{n[:PATH_NAME_CHARS].strip()} {k}" for n, k in mailbox.waiting_from(from_id).most_common(4))
+        return f"{icon}No messages waiting for '{q}'. Waiting: {waiting}"
+    if len(found) > 1:
+        names = _names_list([r["name"] for r in found])
+        return f"{icon}{len(found)} match '{q}': {names}. Give more of the name"
+    n = mailbox.clear_from(from_id, {found[0]["key"]})
+    return f"{icon}Cleared {_plural(n, 'message')} to {found[0]['name']}"
+
+
+def mail(arg: str, from_name: str, from_id: str, contacts: dict, mailbox: Optional[Mailbox] = None) -> str:
+    """!mail <name> <message>: hold a message until the bot hears them.
+    !mail alone shows how to use it and what you have waiting."""
+    mailbox = _mailbox if mailbox is None else mailbox
+    icon = "📮 " if USE_EMOJI else ""
+    if not arg.strip():
+        waiting = mailbox.waiting_from(from_id)
+        mine = ", ".join(f"{n[:PATH_NAME_CHARS].strip()} {k}" for n, k in waiting.most_common(4))
+        return f"{icon}Use !mail <name> <message>" + (f". Waiting: {mine}. !clearmail to cancel" if mine else "")
+    contact, text, error = mail_recipient(arg, contacts)
+    if error:
+        return icon + error
+    if not contact or not text:
+        return f"{icon}Use !mail <name> <message>"
+    if len(text.encode("utf-8")) > MAIL_MAX_BYTES:
+        return f"{icon}Too long, {len(text.encode('utf-8'))} bytes. The most is {MAIL_MAX_BYTES}"
+    key = (contact.get("public_key") or "")[:HEARD_KEY_CHARS]
+    return mailbox.add(from_name or "?", from_id, _contact_name(contact), key, text)
 
 
 # ---------- !freq: frequency lists ----------
@@ -2245,15 +2564,18 @@ PLAIN_COMMANDS = {"ping", "test"}
 # Commands that only work with a leading "!" (returned as "!name")
 BANG_COMMANDS = {"help", "helptest", "helpwx", "helpradio", "helpfun", "helpconv", "helpnet", "conv", "ohm", "res", "roll", "flipacoin", "eightball", "wx", "wxh", "wxf",
                  "warn", "sun", "moon", "aurora", "aq", "pollen", "path", "dist", "hf", "vhf", "uhf",
-                 "who", "status", "bearing", "freq",
-                 "stats", "uptime", "mute", "unmute", "say", "save"}
+                 "who", "status", "bearing", "freq", "mail", "clearmail",
+                 "stats", "uptime", "mute", "unmute", "say", "save",
+                 "addmailuser", "removemailuser", "listmailuser"}
 COMMAND_ALIASES = {"8ball": "eightball", "flip": "flipacoin", "coin": "flipacoin", "dice": "roll",
                    "warnings": "warn", "sunrise": "sun", "sunset": "sun", "trace": "path",
                    "solar": "aurora", "air": "aq", "bands": "hf", "tropo": "uhf",
                    "convert": "conv", "units": "conv", "ohms": "ohm", "vir": "ohm", "ohmslaw": "ohm",
                    "resistor": "res", "colour": "res", "color": "res",
                    "heard": "who", "seen": "status", "lastheard": "status", "brg": "bearing",
-                   "find": "bearing", "freqs": "freq", "frequency": "freq"}
+                   "find": "bearing", "freqs": "freq", "frequency": "freq",
+                   "msg": "mail", "leave": "mail", "mailclear": "clearmail", "unmail": "clearmail", "listmailusers": "listmailuser",
+                   "addmailusers": "addmailuser", "removemailusers": "removemailuser"}
 
 
 def parse_command(body: str) -> tuple[str, str]:
@@ -2403,6 +2725,10 @@ class Sender:
 
     def dm(self, pubkey_prefix: str, text: str) -> None:
         self._put(("dm", pubkey_prefix, trim(text)))
+
+    def room(self) -> int:
+        """Free slots in the send queue."""
+        return self.queue.maxsize - self.queue.qsize()
 
     def _put(self, item) -> None:
         try:
@@ -2565,13 +2891,14 @@ def help_text(topic: str = "") -> str:
     if topic == "conv":
         return "Conversions: !conv 10 mi km, !conv 5 w dbm. !ohm two of V/A/Ω/W, e.g. !ohm 12v 2a. !res 4k7 or !res yellow violet red"
     if topic == "net":
-        return "Net: !who [hours|rpt] heard lately, !status <name> last heard, !bearing <name|place>, !freq <pmr|cb|ham|hf|marine|air|mesh>"
-    return "Help: !helptest (ping, path), !helpnet (who, freq), !helpwx (weather), !helpradio (bands), !helpfun, !helpconv (units)"
+        return "Net: !who [hours|rpt], !status <name>, !bearing <name|place>, !mail <name> <msg> (in a DM), !freq [topic]"
+    return "Help: !helptest (ping, path), !helpnet (who, mail), !helpwx (weather), !helpradio (bands), !helpfun, !helpconv"
 
 
 # Only answered in a DM from a key in ADMIN_PUBKEYS. Channel messages carry no key,
 # so these are never answered in a channel.
-ADMIN_COMMANDS = {"!stats", "!uptime", "!mute", "!unmute", "!say", "!save"}
+ADMIN_COMMANDS = {"!stats", "!uptime", "!mute", "!unmute", "!say", "!save",
+                  "!addmailuser", "!removemailuser", "!listmailuser"}
 
 
 def command_allowed(cmd: str, admin: bool) -> bool:
@@ -3052,6 +3379,24 @@ async def run_command(cmd: str, arg: str, sender_name: str, rx_info: dict[str, A
         return mention + format_who(_heard, arg, budget=MAX_REPLY_BYTES - len(mention.encode("utf-8")))
     if cmd == "!freq":
         return mention + format_freq(arg)
+    if cmd == "!clearmail":
+        # DMs only, like !mail. No approval needed: anyone can cancel their own mail
+        if not dm_key:
+            return mention + ("📮 " if USE_EMOJI else "") + "!clearmail only works in a DM to the bot"
+        return clear_mail(arg, dm_key.lower()[:HEARD_KEY_CHARS])
+    if cmd == "!mail":
+        icon = "📮 " if USE_EMOJI else ""
+        # DMs only: a DM is encrypted to the sender's key, so the bot knows who sent it.
+        # A channel message only carries a name, which anyone can use
+        if not dm_key:
+            return mention + icon + "!mail only works in a DM to the bot"
+        contact = [c for c in contacts.values() if (c.get("public_key") or "").lower().startswith(dm_key.lower())]
+        from_name = _contact_name(contact[0]) if len(contact) == 1 else dm_key[:6]
+        from_id = dm_key.lower()[:HEARD_KEY_CHARS]
+        admins = {k.strip().lower()[:HEARD_KEY_CHARS] for k in ADMIN_PUBKEYS}
+        if not (_mail_users.allowed(from_id) or from_id in admins):
+            return mention + icon + "!mail is only for approved users. Ask an admin to add you"
+        return mention + mail(arg, from_name, from_id, contacts)
     if cmd.startswith("!help"):
         return help_text(cmd[5:] or arg)
     if cmd == "!conv":
@@ -3097,8 +3442,14 @@ async def run_command(cmd: str, arg: str, sender_name: str, rx_info: dict[str, A
         return mention + mute(arg)
     if cmd == "!unmute":
         return mention + unmute()
+    if cmd == "!addmailuser":
+        return mention + add_mail_user(arg, contacts)
+    if cmd == "!removemailuser":
+        return mention + remove_mail_user(arg)
+    if cmd == "!listmailuser":
+        return mention + list_mail_users(contacts, budget=budget)
     if cmd == "!save":
-        return mention + save_heard()
+        return mention + save_state()
     if cmd == "!say":
         return mention + say(arg)
     if cmd in WX_MODES:
@@ -3148,6 +3499,10 @@ async def main(port: str) -> None:
     _LOGGER.info("%d repeaters known for !path names", len(repeater_names()))
     _heard.load(heard_path())
     _LOGGER.info("%d nodes remembered for !who and !status", len(_heard.nodes))
+    _mailbox.load(mail_path())
+    _mail_users.load(mail_users_path())
+    _LOGGER.info("%d users allowed to use !mail", len(_mail_users.users))
+    _LOGGER.info("%d messages waiting in the !mail box", len(_mailbox.messages))
 
     def contact_by_key(key: str) -> Optional[dict]:
         key = (key or "").lower()
@@ -3157,14 +3512,31 @@ async def main(port: str) -> None:
                  if (c.get("public_key") or "").lower().startswith(key)]
         return found[0] if len(found) == 1 else None
 
+    def heard(name: str, via: str, info: Optional[dict] = None, key: str = "", repeater: bool = False):
+        """An advert (signed) or DM (encrypted to the key) proves this key is about: note it
+        for !who and !status, then pass on any !mail waiting for it. Channel messages only
+        carry a name, so they never come here."""
+        _heard.record(name, via, key, info, repeater=repeater)
+        if repeater or mute_remaining() > 0:
+            return
+        # Take only what the send queue can hold, leaving room for replies. A message
+        # taken but dropped by a full queue would be lost, so the rest wait for next time
+        for m in _mailbox.take_for(key, limit=sender.room() - MAIL_TX_RESERVE):
+            contact = contact_by_key(m["to_key"])
+            if contact is None:
+                _LOGGER.warning("Mail for %s dropped, no longer in contacts", m["to"])
+                continue
+            _LOGGER.info("Mail from %s to %s passed on", m["from"], m["to"])
+            sender.dm(m["to_key"], format_mail(m))
+
     async def handle_advert(event):
         """An advert tells !who and !status a node is still about, repeaters included."""
         payload = event.payload or {}
         key = payload.get("public_key", "")
         contact = contact_by_key(key) or (payload if payload.get("adv_name") else None)
         if contact and _contact_name(contact) != self_name:
-            _heard.record(_contact_name(contact), "advert", key=key,
-                          repeater=contact.get("type") != CHAT_NODE_TYPE)
+            heard(_contact_name(contact), "advert", key=key,
+                  repeater=contact.get("type") != CHAT_NODE_TYPE)
 
     async def handle_rx_log_data(event):
         parsed = parse_rx_log_data(event.payload or {})
@@ -3216,9 +3588,6 @@ async def main(port: str) -> None:
             return
         _stats.heard += 1
         rx_info = message_rx_info(msg)
-        named = [c for c in (meshcore.contacts or {}).values() if _contact_name(c) == sender_name]
-        _heard.record(sender_name, f"ch{chan}", rx_info,
-                      key=named[0].get("public_key", "") if len(named) == 1 else "")
         cmd, arg = parse_command(body)
         _LOGGER.log(logging.INFO if cmd else logging.DEBUG, "RX ch%s %s: %s", chan, sender_name, body)
         dispatch(cmd, arg, sender_name,
@@ -3238,7 +3607,7 @@ async def main(port: str) -> None:
         rx_info = message_rx_info(msg)
         contact = contact_by_key(prefix)
         if contact:
-            _heard.record(_contact_name(contact), "dm", rx_info, key=prefix)
+            heard(_contact_name(contact), "dm", rx_info, key=prefix)
         cmd, arg = parse_command(text)
         _LOGGER.log(logging.INFO if cmd else logging.DEBUG, "RX dm %s: %s", prefix, text)
         dispatch(cmd, arg, "",
@@ -3269,7 +3638,8 @@ async def main(port: str) -> None:
             _air_cache.cleanup()
             _hamqsl_cache.cleanup()
             _tropo_cache.cleanup()
-            _heard.prune()      # in memory only: HEARD_FILE is written on exit or by !save
+            _heard.prune()      # in memory only: HEARD_FILE and MAIL_FILE are written on exit or by !save
+            _mailbox.prune()
             await refresh_contacts()
 
     tasks = [
@@ -3285,8 +3655,9 @@ async def main(port: str) -> None:
     finally:
         # Only written here and by an admin !save, to spare the SD card. systemd stops the bot
         # with SIGINT, so this runs on stop, restart and a clean reboot. A power cut loses
-        # what was heard since the last save.
+        # what was heard and any mail left since the last save.
         _heard.save(heard_path())
+        _mailbox.save(mail_path())
         for t in tasks + list(running):
             t.cancel()
         for s in subs:
