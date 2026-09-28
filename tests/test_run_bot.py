@@ -1384,6 +1384,32 @@ def test_schedule_skips_empty_message(monkeypatch):
     assert sent == []
 
 
+
+def test_schedule_skips_warn_with_no_warnings(monkeypatch):
+    sent = []
+    fake = type("FakeSender", (), {"channel": lambda self, ch, t: sent.append((ch, t)),
+                                   "dm": lambda self, k, t: sent.append((k, t))})()
+    monkeypatch.setattr(mp.state, "muted_until", 0.0)
+    monkeypatch.setattr(mp.schedule, "due_slot", lambda entry, now: "slot-1")
+    monkeypatch.setattr(mp.alerts, "_warn_region_sync", lambda q: "ee")
+    feed = {"ee": []}
+    monkeypatch.setattr(mp.alerts, "_fetch_warnings_sync", lambda code: feed[code])
+    entry = {"name": "w", "time": "07:00", "channel": 1, "text": "Morning {warn}"}
+
+    async def run_once():
+        task = asyncio.create_task(mp.schedule.scheduler(fake, [entry]))
+        await asyncio.sleep(0.05)
+        task.cancel()
+    asyncio.run(run_once())
+    assert sent == []
+
+    feed["ee"] = [{"level": "yellow", "hazard": "rain", "area": "", "start": None, "end": None}]
+    asyncio.run(run_once())
+    assert len(sent) == 1 and sent[0][0] == 1 and "Rain" in sent[0][1]
+    # !warn and --warn still say there are none
+    feed["ee"] = []
+    assert "No weather warnings" in asyncio.run(mp.alerts.get_warnings("ee"))
+
 # ---------- weather formatting ----------
 def _hourly(n=8):
     start = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)

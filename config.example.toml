@@ -120,8 +120,8 @@
 # text = "{wxf}"
 #
 # Weather warnings every morning. {warn} uses default_location; {warn:nw} or
-# {warn:Cromer} picks a region or place. A scheduled post doesn't start alerts,
-# only someone sending !warn does.
+# {warn:Cromer} picks a region or place. Nothing is sent on days with no
+# warnings. A scheduled post doesn't start alerts, only someone sending !warn does.
 # [[scheduled_messages]]
 # name = "morning-warnings"
 # time = "07:00"

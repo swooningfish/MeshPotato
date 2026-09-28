@@ -198,8 +198,13 @@ async def lookup_warnings(query: str, budget: Optional[int] = None,
     return code, warnings, format_warnings(warnings, code, budget=budget)
 
 
-async def get_warnings(query: str, budget: Optional[int] = None, quiet: bool = False) -> Optional[str]:
-    return (await lookup_warnings(query, budget=budget, quiet=quiet))[2]
+async def get_warnings(query: str, budget: Optional[int] = None, quiet: bool = False,
+                       only_live: bool = False) -> Optional[str]:
+    """only_live: None instead of "No weather warnings" when there are none."""
+    code, warnings, text = await lookup_warnings(query, budget=budget, quiet=quiet)
+    if only_live and warnings is not None and not _live_warn_keys(warnings, datetime.now(cfg.TIMEZONE)):
+        return None
+    return text
 
 
 # ---------- Warning alerts ----------

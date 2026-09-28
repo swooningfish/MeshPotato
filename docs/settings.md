@@ -192,7 +192,7 @@ Each message needs `text`, a target and a timing rule. `name` is optional and sh
 | `{wx}` / `{wx:Cambridge}` | Current weather |
 | `{wxh}` / `{wxh:Ipswich}` | Hourly outlook |
 | `{wxf}` / `{wxf:Ipswich}` | 3-day forecast |
-| `{warn}` / `{warn:Ipswich}` | Weather warnings |
+| `{warn}` / `{warn:Ipswich}` | Weather warnings (the whole message is skipped when there are none) |
 | `{sun}` / `{sun:Ipswich}` | Sunrise, sunset and daylight |
 | `{moon}` | Moon phase |
 | `{aurora}` | Aurora alert level |

@@ -105,6 +105,9 @@ async def scheduler(sender: Sender, entries: list[dict]) -> None:
                 continue
             _LOGGER.info("Schedule '%s' firing (%s)", entry.get("name", i), slot)
             text = await expand_tokens(entry["text"])
+            if text is None:                    # e.g. "{warn}" with no weather warnings
+                _LOGGER.info("Schedule '%s' skipped, no weather warnings", entry.get("name", i))
+                continue
             if not text.strip():                # e.g. "{wx}" alone with no Met Office API key
                 _LOGGER.info("Schedule '%s' skipped, nothing to send", entry.get("name", i))
                 continue
