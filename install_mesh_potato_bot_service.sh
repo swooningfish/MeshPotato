@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # Install the MeshCore MeshPotato bot as a systemd service (Arch Linux / Arch Linux ARM / Raspberry Pi).
 #
-# Usage (run as your normal user, not root; it asks for sudo when needed):
+# Usage (as your normal user it asks for sudo when needed; it can also run as root):
 #   ./install_mesh_potato_bot_service.sh                         # defaults below
 #   ./install_mesh_potato_bot_service.sh --script run_bot.py --port /dev/ttyACM0
 #   ./install_mesh_potato_bot_service.sh --python ~/meshbot/bin/python
+#   sudo ./install_mesh_potato_bot_service.sh --user alarm       # service runs as alarm
 #   ./install_mesh_potato_bot_service.sh --uninstall
 #
 # After install:
@@ -16,6 +17,7 @@ SERVICE_NAME="meshcore-meshpotato-bot"
 SCRIPT="run_bot.py"
 PORT=""
 PYTHON="$(command -v python3 || true)"
+RUN_USER=""
 UNINSTALL=0
 
 # Stop with a clear message when an option is missing its value
@@ -32,23 +34,23 @@ while [[ $# -gt 0 ]]; do
         --port)      need_value "$@"; PORT="$2"; shift 2 ;;
         --python)    need_value "$@"; PYTHON="$2"; shift 2 ;;
         --name)      need_value "$@"; SERVICE_NAME="$2"; shift 2 ;;
+        --user)      need_value "$@"; RUN_USER="$2"; shift 2 ;;
         --uninstall) UNINSTALL=1; shift ;;
-        -h|--help)   sed -n '2,12p' "$0"; exit 0 ;;
+        -h|--help)   sed -n '2,13p' "$0"; exit 0 ;;
         *) echo "Unknown option: $1" >&2; exit 1 ;;
     esac
 done
 
 UNIT_PATH="/etc/systemd/system/${SERVICE_NAME}.service"
 
-if [[ $EUID -eq 0 ]]; then
-    echo "Run this as your normal user (e.g. alarm), not root. It calls sudo itself." >&2
-    exit 1
-fi
+# Root needs no sudo (and may not have it installed)
+SUDO="sudo"
+[[ $EUID -eq 0 ]] && SUDO=""
 
 if [[ $UNINSTALL -eq 1 ]]; then
-    sudo systemctl disable --now "${SERVICE_NAME}" 2>/dev/null || true
-    sudo rm -f "${UNIT_PATH}"
-    sudo systemctl daemon-reload
+    $SUDO systemctl disable --now "${SERVICE_NAME}" 2>/dev/null || true
+    $SUDO rm -f "${UNIT_PATH}"
+    $SUDO systemctl daemon-reload
     echo "Removed ${SERVICE_NAME}."
     exit 0
 fi
@@ -60,7 +62,11 @@ if [[ "$SCRIPT" != /* && ! -f "$SCRIPT" && -f "${INSTALLER_DIR}/${SCRIPT}" ]]; t
     SCRIPT="${INSTALLER_DIR}/${SCRIPT}"
 fi
 
-RUN_USER="$(id -un)"
+# The service runs as --user if given, else the user who called sudo,
+# else whoever is running this (which may be root)
+[[ -n "$RUN_USER" ]] || RUN_USER="${SUDO_USER:-$(id -un)}"
+getent passwd "$RUN_USER" >/dev/null || { echo "No such user: $RUN_USER" >&2; exit 1; }
+RUN_GROUP="$(id -gn "$RUN_USER")"
 RUN_HOME="$(getent passwd "$RUN_USER" | cut -d: -f6)"
 SCRIPT_PATH="$(realpath "$SCRIPT")"
 WORK_DIR="$(dirname "$SCRIPT_PATH")"
@@ -83,9 +89,9 @@ fi
 # Serial group (uucp on Arch, dialout on Debian/Raspberry Pi OS)
 SERIAL_GROUP="uucp"
 getent group uucp >/dev/null || SERIAL_GROUP="dialout"
-if ! id -nG "$RUN_USER" | tr ' ' '\n' | grep -qx "$SERIAL_GROUP"; then
+if [[ "$RUN_USER" != "root" ]] && ! id -nG "$RUN_USER" | tr ' ' '\n' | grep -qx "$SERIAL_GROUP"; then
     echo "Adding $RUN_USER to the $SERIAL_GROUP group for serial access."
-    sudo usermod -aG "$SERIAL_GROUP" "$RUN_USER"
+    $SUDO usermod -aG "$SERIAL_GROUP" "$RUN_USER"
 fi
 
 # API key: the service does not read ~/.bashrc, so it needs the key in
@@ -102,6 +108,8 @@ elif [[ ! -s "$KEY_FILE" ]]; then
         umask 077
         printf '%s\n' "$METOFFICE_API_KEY" > "$KEY_FILE"
         chmod 600 "$KEY_FILE"
+        # Keep the key readable by the service user when saved as root
+        [[ $EUID -eq 0 ]] && chown -R "$RUN_USER:$RUN_GROUP" "$(dirname "$KEY_FILE")"
         echo "Saved METOFFICE_API_KEY to $KEY_FILE"
     else
         echo "WARNING: no API key found. Set metoffice_api_key in $CONFIG_FILE"
@@ -132,7 +140,7 @@ StartLimitIntervalSec=0
 [Service]
 Type=simple
 User=${RUN_USER}
-Group=${RUN_USER}
+Group=${RUN_GROUP}
 SupplementaryGroups=${SERIAL_GROUP}
 WorkingDirectory=${WORK_DIR}
 Environment=HOME=${RUN_HOME}
@@ -152,17 +160,17 @@ ProtectSystem=full
 WantedBy=multi-user.target
 EOF
 
-sudo install -m 644 "$TMP_UNIT" "$UNIT_PATH"
+$SUDO install -m 644 "$TMP_UNIT" "$UNIT_PATH"
 rm -f "$TMP_UNIT"
 
 # ModemManager grabs /dev/ttyACM* devices and blocks the radio
 if systemctl is-active --quiet ModemManager 2>/dev/null; then
     echo "ModemManager is running and can grab the radio. Disabling it."
-    sudo systemctl disable --now ModemManager
+    $SUDO systemctl disable --now ModemManager
 fi
 
-sudo systemctl daemon-reload
-sudo systemctl enable --now "${SERVICE_NAME}"
+$SUDO systemctl daemon-reload
+$SUDO systemctl enable --now "${SERVICE_NAME}"
 
 echo
 echo "Installed ${UNIT_PATH}"

@@ -248,12 +248,15 @@ Run from `~/MeshPotato` as your normal user (it asks for sudo when needed):
 ./install_mesh_potato_bot_service.sh
 ```
 
+It also works as root. Under `sudo`, the service still runs as the user who called sudo. Logged in as root, the service runs as root unless you pass `--user`.
+
 | Option | Default | Purpose |
 |--------|---------|---------|
 | `--port` | first `/dev/serial/by-id/*` | The radio's serial port |
 | `--python` | `python3` | Python to use, such as `~/meshbot/bin/python` for a virtual environment |
 | `--script` | `run_bot.py` | Which bot file to run |
 | `--name` | `meshcore-meshpotato-bot` | Service name |
+| `--user` | you (or the user who called `sudo`) | Which user the service runs as |
 | `--uninstall` | | Remove the service |
 
 For example:
