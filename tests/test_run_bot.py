@@ -209,9 +209,9 @@ def test_repeater_names():
 def test_format_path_names_unique_matches_only():
     info = {"path_len": 3, "path_nodes": ["a1", "b2", "c3"]}
     out = mp.rx.format_path(info, mp.contacts.repeater_names(CONTACTS))
-    assert out == "🛤️ 3 hops: a1 Norwich Cath › b2 › c3"
+    assert out == "🛤️ 3 hops: a1 Norwich Cath,b2,c3"
     assert mp.rx.format_path({"path_len": 2, "path_nodes": ["b2aa", "c3cc"]},
-                           mp.contacts.repeater_names(CONTACTS)) == "🛤️ 2 hops: b2aa Hill Top › c3cc"
+                           mp.contacts.repeater_names(CONTACTS)) == "🛤️ 2 hops: b2 Hill Top,c3"
 
 
 def test_format_path_fits_budget():
@@ -220,9 +220,9 @@ def test_format_path_fits_budget():
     names = {f"{i:02x}0000": f"Repeater{i}" for i in range(20)}
     out = mp.rx.format_path(info, names, budget=60)
     assert len(out.encode("utf-8")) <= 60
-    assert out.startswith("🛤️ 20 hops: 00 › 01 › ") and out.endswith(" more")
+    assert out.startswith("🛤️ 20 hops: 00,01,") and out.endswith(" more")
     short = mp.rx.format_path({"path_len": 2, "path_nodes": ["a1", "b2"]}, names={"a1ff": "X" * 12}, budget=30)
-    assert short == "🛤️ 2 hops: a1 › b2"                # names dropped before hops are
+    assert short == "🛤️ 2 hops: a1,b2"                  # names dropped before hops are
 
 
 @pytest.mark.parametrize("info, expected", [
@@ -243,7 +243,7 @@ def test_path_command_and_trace_alias(monkeypatch):
     assert asyncio.run(mp.commands.run_command("!path", "", "Alice", info)) == "@[Alice] 🛤️ 1 hop: a1 Norwich Cath"
     monkeypatch.setattr(mp.config, "USE_EMOJI", False)
     monkeypatch.setattr(mp.state, "radio", None)
-    assert mp.rx.format_path({"path_len": 2, "path_nodes": ["a1", "b2"]}, mp.contacts.repeater_names()) == "Path 2 hops: a1 > b2"
+    assert mp.rx.format_path({"path_len": 2, "path_nodes": ["a1", "b2"]}, mp.contacts.repeater_names()) == "Path 2 hops: a1,b2"
 
 
 AURORA_STATUS_XML = b"""<?xml version='1.0' encoding='UTF-8' standalone='yes'?>
@@ -1583,7 +1583,8 @@ WIND = _warning("amber", "wind", NOW + timedelta(hours=4), NOW + timedelta(hours
 
 def test_warn_starts_watch_on_its_channel(warn_feed, monkeypatch):
     monkeypatch.setattr(mp.alerts, "_warn_region_sync", lambda q: "ee")
-    warn_feed["ee"] = [RAIN]
+    now = datetime.now(LONDON)                              # !warn reads the clock, so RAIN would have run out
+    warn_feed["ee"] = [_warning("yellow", "rain", now + timedelta(hours=16), now + timedelta(hours=31))]
     reply = asyncio.run(mp.commands.run_command("!warn", "", "Alice", {}, ("chan", 1)))
     assert reply.startswith("@[Alice] ⚠️ East of England:")
     assert list(mp.alerts.watcher.watches) == [("chan", 1, "ee")]

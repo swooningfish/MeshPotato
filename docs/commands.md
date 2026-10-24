@@ -66,13 +66,13 @@ Town names cover Great Britain only. Use a postcode for Northern Ireland. If a p
 
 | Command | Reply |
 |---------|-------|
-| `!path` | `@[You] 🛤️ 3 hops: a1 Norwich Cath › b2 › c3` |
+| `!path` | `@[You] 🛤️ 3 hops: a1 Norwich Cath,b2,c3` |
 | `!route` | `@[You] 🗺️ https://meshrank.net/path/65160` |
 | `!dist` | `@[You] 📏 You ›15km› a1 ›?› b2 ›5.0km› Bot \| 20km+, 1 of 3 legs unknown \| 34km direct` |
 
 Alias: `!trace` = `!path`.
 
-**`!path`** lists the repeaters your message came through, first one first. Each repeater shows as the short code MeshCore uses for it, plus its name when the bot can be sure which repeater it is.
+**`!path`** lists the repeaters your message came through, first one first. Each repeater shows as the first 2 characters of the code MeshCore uses for it, plus its name when the bot can be sure which repeater it is.
 
 - `0 hops, heard directly` means no repeater was involved.
 - If the path is too long for one message, the names are dropped, then the last repeaters become `+2 more`.

@@ -9,6 +9,7 @@ from .contacts import PATH_NAME_CHARS
 
 RX_LOG_MAX_AGE_SEC = 5.0        # an RX log older than this can't be the packet that carried a message
 DIRECT_PATH_LEN = 0xFF          # path_len of a message that arrived by direct route
+PATH_HOP_CHARS = 2              # each hop in !path is cut to this many characters, to fit more hops
 
 # Last RX_LOG_DATA seen: path_len, path_nodes, snr, rssi and its monotonic time "at"
 latest_rx: dict[str, Any] = {}
@@ -98,19 +99,20 @@ def format_rx_report(info: dict[str, Any]) -> str:
 
 
 def _node_label(node: str, names: dict[str, str]) -> str:
-    """'a1 Norwich' when exactly one known repeater's key starts with the hash, else 'a1'."""
+    """'a1 Norwich' when exactly one known repeater's key starts with the hash, else 'a1'.
+    The name is matched on the full hash, but only PATH_HOP_CHARS of it are shown."""
     matches = [n for key, n in names.items() if key.startswith(node.lower())]
     if len(matches) != 1:
-        return node
-    return f"{node} {matches[0][:PATH_NAME_CHARS].strip()}"
+        return node[:PATH_HOP_CHARS]
+    return f"{node[:PATH_HOP_CHARS]} {matches[0][:PATH_NAME_CHARS].strip()}"
 
 
 def format_path(info: dict[str, Any], names: Optional[dict[str, str]] = None,
                 budget: Optional[int] = None) -> str:
-    """!path: '🛤️ 3 hops: a1 Norwich › b2 › c3', first repeater first.
+    """!path: '🛤️ 3 hops: a1 Norwich,b2,c3', first repeater first.
     Leaves the names out if they don't fit, then the last repeaters ('+2 more')."""
     budget = cfg.MAX_REPLY_BYTES if budget is None else budget
-    icon, sep = ("🛤️ ", " › ") if cfg.USE_EMOJI else ("Path ", " > ")
+    icon, sep = ("🛤️ " if cfg.USE_EMOJI else "Path "), ","
     if info.get("direct"):
         return f"{icon}Direct route, the path isn't carried in the message"
     n = info.get("path_len")
@@ -118,11 +120,12 @@ def format_path(info: dict[str, Any], names: Optional[dict[str, str]] = None,
         return f"{icon}Path unknown"
     if n == 0:
         return f"{icon}0 hops, heard directly"
-    nodes = info.get("path_nodes") or []
-    if not nodes:
+    full = info.get("path_nodes") or []
+    if not full:
         return f"{icon}{hops_text(n)}, path not reported"
+    nodes = [x[:PATH_HOP_CHARS] for x in full]
     head = f"{icon}{hops_text(n)}: "
-    for labels in ([_node_label(x, names or {}) for x in nodes], nodes):
+    for labels in ([_node_label(x, names or {}) for x in full], nodes):
         text = head + sep.join(labels)
         if len(text.encode("utf-8")) <= budget:
             return text
